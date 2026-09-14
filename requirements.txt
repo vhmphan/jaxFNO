@@ -1,0 +1,6 @@
+numpy>=1.26
+scipy>=1.11
+jax[cpu]>=0.4.28
+equinox>=0.11
+optax>=0.2
+matplotlib>=3.8
