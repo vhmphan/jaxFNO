@@ -11,9 +11,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from config import FNOConfig
-from data import Dataset, dataset_fingerprint, dataset_from_config, encode_source_features, inspect_npz
-from fno import infer_batch, make_model, predict
+from jaxfno.config import FNOConfig
+from jaxfno.data import Dataset, dataset_fingerprint, dataset_from_config, encode_source_features, inspect_npz
+from jaxfno.fno import infer_batch, make_model, predict
 
 
 def split_dataset(n, val_frac=0.1, test_frac=0.1, seed=0, groups=None):
@@ -142,6 +142,9 @@ def train_model(cfg: FNOConfig, dataset: Dataset):
     best_model, best_val, stale = model, float("inf"), 0
     history = {"train": [], "val": []}
     output = Path(cfg.checkpoint_dir)
+    if not output.is_absolute():
+        output = Path(__file__).resolve().parent / output
+    cfg.checkpoint_dir = str(output)
     output.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(cfg.seed)
     for epoch in range(cfg.epochs):
@@ -173,7 +176,7 @@ def train_model(cfg: FNOConfig, dataset: Dataset):
         if stale >= cfg.patience:
             break
     (output / "history.json").write_text(json.dumps(history, indent=2))
-    from plots import plot_history
+    from jaxfno.plots import plot_history
     plot_history(history, output / "loss_curves.png")
     return best_model, {**scales, **split}
 
@@ -182,7 +185,7 @@ def main():
     parser = argparse.ArgumentParser(description="Supervised 3D FNO training")
     parser.add_argument("--config", help="JSON FNOConfig with model settings and dataset layout")
     inputs = parser.add_mutually_exclusive_group()
-    inputs.add_argument("--data", help="Override the training NPZ path (default: data_uxyz.npz)")
+    inputs.add_argument("--data", help="Override the training NPZ path (default: uxyz_data.npz)")
     inputs.add_argument("--synthetic", action="store_true", help="Run the explicit synthetic smoke test")
     args = parser.parse_args()
     if args.config:
@@ -190,14 +193,19 @@ def main():
     elif args.synthetic:
         cfg = FNOConfig(data_path="synthetic", width=8, modes=(4, 4, 3), padding=2,
                         epochs=8, batch_size=4, synthetic_grid=(8, 8, 6),
-                        checkpoint_dir="checkpoints/smoke")
+                        checkpoint_dir=str(Path(__file__).resolve().parent / "model" / "smoke"))
     else:
-        cfg = FNOConfig(data_path="data_uxyz.npz", checkpoint_dir="checkpoints/physical",
-                        dataset_layout={"format": "sol3d", "source_path": "sources.npz"})
+        cfg = FNOConfig(data_path="uxyz_data.npz",
+                        dataset_layout={"format": "sol3d", "source_grid": "uniform_domain"})
     if args.data:
         cfg.data_path = args.data
     elif args.synthetic:
         cfg.data_path = "synthetic"
+    if cfg.dataset_layout.get("format") == "sol3d":
+        # Reconstruct the uniform source grid from this export's S and domain,
+        # including when an older configuration still names a companion file.
+        cfg.dataset_layout = {**cfg.dataset_layout, "source_grid": "uniform_domain"}
+        cfg.dataset_layout.pop("source_path", None)
     try:
         if cfg.data_path != "synthetic":
             print(json.dumps(inspect_npz(cfg.data_path), indent=2))

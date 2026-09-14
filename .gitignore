@@ -2,6 +2,8 @@
 *.npz
 *.png
 checkpoints/
+artifacts/
+model/
 
 # Local Python environment and caches
 .venv/

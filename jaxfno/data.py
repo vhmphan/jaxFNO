@@ -13,7 +13,7 @@ import numpy as np
 @dataclass
 class Dataset:
     S: np.ndarray
-    u: np.ndarray
+    u: np.ndarray | None  # None when loading only sources for prediction
     x: np.ndarray
     y: np.ndarray
     z: np.ndarray
@@ -22,6 +22,8 @@ class Dataset:
 
     def __post_init__(self):
         for name in ("S", "u", "x", "y", "z"):
+            if name == "u" and self.u is None:
+                continue
             value = np.asarray(getattr(self, name))
             if value.dtype.kind not in "fiu" or not np.isfinite(value).all():
                 raise ValueError(f"{name} must contain finite real numbers")
@@ -31,9 +33,9 @@ class Dataset:
         for name in ("x", "y", "z"):
             validate_coordinate(getattr(self, name), name)
         expected = (len(self.S), len(self.x), len(self.y))
-        if self.S.shape != expected or self.u.shape != (*expected, len(self.z)) or not len(self.S):
+        if self.S.shape != expected or (self.u is not None and self.u.shape != (*expected, len(self.z))) or not len(self.S):
             raise ValueError(f"Expected paired S{expected}, u{(*expected, len(self.z))}; "
-                             f"got {self.S.shape}, {self.u.shape}")
+                             f"got {self.S.shape}, {None if self.u is None else self.u.shape}")
         if self.groups is not None:
             self.groups = np.asarray(self.groups)
             if self.groups.shape != (len(self.S),):
@@ -104,10 +106,10 @@ def encode_source_features(S, x, y, z, source_scale=1.0):
     return np.stack([source, *[np.broadcast_to(c, shape) for c in grid]], axis=1).astype(np.float32)
 
 
-def _load_npz_dataset(path, layout=None):
+def _load_npz_dataset(path, layout=None, *, sources_only=False):
     """Require an explicit key/axis mapping; equal grid sizes cannot identify axes."""
     if layout and layout.get("format") == "sol3d":
-        return _load_sol3d_dataset(path, layout)
+        return _load_sol3d_dataset(path, layout, sources_only=sources_only)
     with np.load(path, allow_pickle=False) as data:
         metadata = json.loads(str(data["metadata"].item())) if "metadata" in data else {}
         mapping = dict(metadata.get("layout", {}))
@@ -126,7 +128,7 @@ def _load_npz_dataset(path, layout=None):
                 raise ValueError(f"Invalid axis order {axes!r} for {key}; expected a permutation of {desired}")
             return arr.transpose(tuple(axes.index(a) for a in desired))
         S = ordered(mapping["source_key"], mapping["source_axes"], "nxy")
-        u = ordered(mapping["target_key"], mapping["target_axes"], "nxyz")
+        u = None if sources_only else ordered(mapping["target_key"], mapping["target_axes"], "nxyz")
         coords = [np.asarray(data[mapping[f"{axis}_key"]]) for axis in "xyz"]
         groups = np.asarray(data[mapping["group_key"]]) if mapping.get("group_key") else None
         metadata.update(file=str(path), layout=mapping,
@@ -134,7 +136,7 @@ def _load_npz_dataset(path, layout=None):
         return Dataset(S, u, *coords, metadata, groups)
 
 
-def _load_sol3d_dataset(path, layout):
+def _load_sol3d_dataset(path, layout, *, sources_only=False):
     """Adapt the inspected sol3D.py export, reproducing its source interpolation.
 
     S is already normalized to nyx by sol3D.load_source; do not transpose it
@@ -152,44 +154,53 @@ def _load_sol3d_dataset(path, layout):
             raise ValueError("sol3d expects axis_order='zyx'")
         coords = [np.asarray(data[a], dtype=np.float64) for a in "xyz"]
         source = np.asarray(data["S"], dtype=np.float64)
-        target = np.asarray(data["u"], dtype=np.float64)
-        if source.ndim != 3 or target.ndim != 4 or int(data["N"]) != len(source):
+        target = None if sources_only else np.asarray(data["u"], dtype=np.float64)
+        if source.ndim != 3 or (target is not None and target.ndim != 4) or int(data["N"]) != len(source):
             raise ValueError("Invalid sol3d sample count or array ranks")
-        if not np.isfinite(source).all() or not np.isfinite(target).all():
+        if not np.isfinite(source).all() or (target is not None and not np.isfinite(target).all()):
             raise ValueError("sol3d source and target must be finite")
     for a, c in zip("xyz", coords):
         validate_coordinate(c, a)
         if len(c) < 5 or np.any(np.diff(c) <= 0):
             raise ValueError("sol3d requires increasing coordinate vectors with ghost cells")
     x, y, z = [c[1:-1] for c in coords]
-    if target.shape != (len(source), len(z), len(y), len(x)):
+    if target is not None and target.shape != (len(source), len(z), len(y), len(x)):
         raise ValueError("sol3d target shape does not match coordinates with one ghost cell per end")
 
-    # sol3D.py omits source coordinates, so recover them from its paired input.
-    with np.load(source_path, allow_pickle=False) as data:
-        sx, sy = [np.asarray(data[a], dtype=np.float64) for a in "xy"]
-        key = next((k for k in ("realizations", "source", "S") if k in data), None)
-        if key is None:
-            raise ValueError("Source file must contain realizations, source, or S")
-        original = np.asarray(data[key], dtype=np.float64)
-    for a, c in (("source x", sx), ("source y", sy)):
-        validate_coordinate(c, a)
-        if np.any(np.diff(c) <= 0):
-            raise ValueError("sol3d source coordinates must increase")
-    if original.ndim == 2:
-        original = original[None]
-    # Mirror normalize_realizations exactly, including its square-grid branch.
-    if original.ndim == 3 and original.shape[-2:] == (len(sx), len(sy)):
-        original = original.transpose(0, 2, 1)
-    if original.shape != (len(source), len(sy), len(sx)) or not np.array_equal(original, source):
-        raise ValueError("Source file does not match sol3d S values and sample order")
+    if layout.get("source_grid") == "uniform_domain":
+        # The inspected source generator samples a uniform grid over the same
+        # physical domain. sol3D.py stores S in (N, Ny_source, Nx_source) order.
+        # Solver coordinates include one ghost node at each end, removed above.
+        sx = np.linspace(x[0], x[-1], source.shape[2], dtype=np.float64)
+        sy = np.linspace(y[0], y[-1], source.shape[1], dtype=np.float64)
+        validate_coordinate(sx, "source x")
+        validate_coordinate(sy, "source y")
+    else:
+        # sol3D.py omits source coordinates, so recover them from its paired input.
+        with np.load(source_path, allow_pickle=False) as data:
+            sx, sy = [np.asarray(data[a], dtype=np.float64) for a in "xy"]
+            key = next((k for k in ("realizations", "source", "S") if k in data), None)
+            if key is None:
+                raise ValueError("Source file must contain realizations, source, or S")
+            original = np.asarray(data[key], dtype=np.float64)
+        for a, c in (("source x", sx), ("source y", sy)):
+            validate_coordinate(c, a)
+            if np.any(np.diff(c) <= 0):
+                raise ValueError("sol3d source coordinates must increase")
+        if original.ndim == 2:
+            original = original[None]
+        # Mirror normalize_realizations exactly, including its square-grid branch.
+        if original.ndim == 3 and original.shape[-2:] == (len(sx), len(sy)):
+            original = original.transpose(0, 2, 1)
+        if original.shape != (len(source), len(sy), len(sx)) or not np.array_equal(original, source):
+            raise ValueError("Source file does not match sol3d S values and sample order")
     if not (np.allclose(x[[0, -1]], sx[[0, -1]], rtol=0, atol=1e-10)
             and np.allclose(y[[0, -1]], sy[[0, -1]], rtol=0, atol=1e-10)):
         raise ValueError("Source and solver domain endpoints differ")
     if not np.allclose(z[[0, -1]], [-4, 4], rtol=0, atol=1e-10):
         raise ValueError("sol3D.py uses z in [-4,4]; this export has a different domain")
     for axis in (1, 2, 3):
-        if np.any(np.take(target, [0, -1], axis=axis) != 0):
+        if target is not None and np.any(np.take(target, [0, -1], axis=axis) != 0):
             raise ValueError("sol3d targets must satisfy zero Dirichlet values on all faces")
 
     # Saved x[1:-1] is full grid_x.centers[2:-2], exactly as in the RHS.
@@ -201,7 +212,10 @@ def _load_sol3d_dataset(path, layout):
         interpolator = RegularGridInterpolator((sy, sx), surface_yx, method="linear", bounds_error=True)
         S[i, 1:-1, 1:-1] = interpolator(points).T
     metadata = {
-        "kind": "physical", "file": str(path), "source_file": str(source_path),
+        "kind": "physical", "file": str(path),
+        "source_file": None if layout.get("source_grid") == "uniform_domain" else str(source_path),
+        "source_coordinate_origin": ("uniform source grid reconstructed from S.shape and physical domain"
+                                     if layout.get("source_grid") == "uniform_domain" else "paired source file"),
         "layout": dict(layout), "generator": "sol3D.py", "shared_bvp": True,
         "units": "solver units; physical units not declared by generator",
         "boundary_conditions": "u=0 on all six Cartesian domain faces",
@@ -216,7 +230,7 @@ def _load_sol3d_dataset(path, layout):
     if layout.get("group_key"):
         with np.load(path, allow_pickle=False) as data:
             groups = np.asarray(data[layout["group_key"]])
-    return Dataset(S, target.transpose(0, 3, 2, 1), x, y, z, metadata, groups)
+    return Dataset(S, None if target is None else target.transpose(0, 3, 2, 1), x, y, z, metadata, groups)
 
 def generate_synthetic_dataset(num_samples: int = 32, nx: int = 16, ny: int = 16, nz: int = 12, seed: int = 0) -> Dataset:
     rng = np.random.default_rng(seed)
@@ -252,7 +266,7 @@ def generate_synthetic_dataset(num_samples: int = 32, nx: int = 16, ny: int = 16
     )
 
 
-def load_dataset(path: str | Path, *, layout=None, num_samples=32, grid=(16, 16, 12), seed=0) -> Dataset:
+def load_dataset(path: str | Path, *, layout=None, num_samples=32, grid=(16, 16, 12), seed=0, sources_only=False) -> Dataset:
     if str(path) == "synthetic":
         return generate_synthetic_dataset(num_samples, *grid, seed=seed)
     dataset_path = Path(path)
@@ -260,7 +274,7 @@ def load_dataset(path: str | Path, *, layout=None, num_samples=32, grid=(16, 16,
         raise FileNotFoundError(f"Dataset not found: {path}. Use 'synthetic' explicitly for a smoke test.")
     if dataset_path.suffix.lower() != ".npz":
         raise ValueError(f"Unsupported data format: {dataset_path.suffix}")
-    return _load_npz_dataset(dataset_path, layout)
+    return _load_npz_dataset(dataset_path, layout, sources_only=sources_only)
 
 
 def dataset_from_config(cfg):

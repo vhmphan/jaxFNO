@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from data import encode_source_features
+from jaxfno.data import encode_source_features
 
 
 class PointwiseLayer(eqx.Module):

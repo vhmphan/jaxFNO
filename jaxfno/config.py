@@ -24,7 +24,7 @@ class FNOConfig:
     seed: int = 0
     validation_fraction: float = 0.1
     test_fraction: float = 0.1
-    checkpoint_dir: str = "checkpoints"
+    checkpoint_dir: str = field(default_factory=lambda: str(Path(__file__).resolve().parent.parent / "model"))
     synthetic_samples: int = 32
     synthetic_grid: tuple[int, int, int] = (16, 16, 12)
 

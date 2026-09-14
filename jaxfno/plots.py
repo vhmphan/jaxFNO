@@ -88,7 +88,7 @@ def plot_prediction(dataset, index, pred, output):
     plt.close(fig)
 
 
-def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.0, 0.0), subset=None):
+def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.0, 0.0), subset=None, display_realization=None):
     """Source plus orthogonal XY/XZ/YZ slices (not line-of-sight integrals).
 
     Coordinates select nearest grid nodes. All fields are in dataset units,
@@ -129,7 +129,9 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
     info_ax = fig.add_subplot(grid[0, 1:])
     info_ax.set_axis_off()
     kind = dataset.metadata.get("kind", "physical")
-    info = (f"Realization {index} (zero-based)" + (f" · {subset} subset" if subset else "")
+    realization_label = (f"Realization {index} (zero-based)" if display_realization is None
+                         else f"Realization {display_realization} (one-based)")
+    info = (realization_label + (f" · {subset} subset" if subset else "")
             + f"\nDataset: {kind}\n"
             + "XY, XZ, YZ cross-sections at the labeled grid coordinates.\n"
             + "Ground truth and FNO share a color scale in each row.\n"
@@ -151,7 +153,8 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
             ax.set_title(f"{label}: {title}" + (" kpc" if kind != "synthetic" else ""))
             _format_plane(ax, dataset, horizontal, vertical, xlabel, ylabel)
             _panel_colorbar(fig, ax, im, label="u (dataset units)")
-    path = output / f"realization_{index}_comparison.png"
+    number = index if display_realization is None else display_realization
+    path = output / f"realization_{number}_comparison.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path

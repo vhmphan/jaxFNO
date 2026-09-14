@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import equinox as eqx
 import jax
@@ -9,10 +10,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from config import FNOConfig
-from data import Dataset, dataset_fingerprint, encode_source_features, generate_synthetic_dataset, inspect_npz, load_dataset
-from evaluate import error_metrics, evaluate_model, linearity_diagnostics
-from fno import FourierBlock, make_model, predict
+from jaxfno.config import FNOConfig
+from jaxfno.data import Dataset, dataset_fingerprint, encode_source_features, generate_synthetic_dataset, inspect_npz, load_dataset
+from jaxfno.evaluation_metrics import error_metrics, evaluate_model, linearity_diagnostics, select_evaluation_indices
+from evaluate import timed_prediction
+from jaxfno.prediction_io import save_predictions, load_comparison, source_hashes
+from jaxfno.fno import FourierBlock, make_model, predict
 from train import load_predictor, relative_l2_loss, save_checkpoint, split_dataset
 
 
@@ -89,6 +92,64 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Dataset(bad, ds.u, ds.x, ds.y, ds.z, {})
 
+    def test_evaluation_ranges_and_external_dataset(self):
+        ds = generate_synthetic_dataset(10, 4, 5, 6)
+        predictor = SimpleNamespace(coordinates=(ds.x, ds.y, ds.z), metadata=ds.metadata,
+                                    fingerprint=dataset_fingerprint(ds), groups=None,
+                                    splits=dict(zip(("train_idx", "val_idx", "test_idx"), split_dataset(10))))
+        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds), predictor.splits["test_idx"])
+        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds, realization_range=(1, 1)), [0])
+        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds, realization_range=(3, 5)), [2, 3, 4])
+        external = generate_synthetic_dataset(1, 4, 5, 6, seed=99)
+        np.testing.assert_array_equal(select_evaluation_indices(predictor, external, external=True), [0])
+        with self.assertRaisesRegex(ValueError, "sample order"):
+            select_evaluation_indices(predictor, external)
+        for bounds in ((0, 1), (2, 1), (1, 11)):
+            with self.assertRaises(ValueError):
+                select_evaluation_indices(predictor, ds, realization_range=bounds)
+        external.x = external.x + 1
+        with self.assertRaisesRegex(ValueError, "grid"):
+            select_evaluation_indices(predictor, external, external=True)
+
+    def test_prediction_archive_and_sources_only(self):
+        ds = generate_synthetic_dataset(3, 4, 5, 6)
+        layout = dict(source_key="S", target_key="u", source_axes="nxy", target_axes="nxyz",
+                      x_key="x", y_key="y", z_key="z", metadata={"units": "arbitrary",
+                      "boundary_conditions": "test", "shared_bvp": True})
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "truth.npz"
+            source_path = Path(temp) / "only_sources.npz"
+            pred_path = Path(temp) / "pred.npz"
+            np.savez(path, S=ds.S, u=ds.u, x=ds.x, y=ds.y, z=ds.z)
+            # Deliberately no target key: prediction loading must not require u.
+            np.savez(source_path, S=ds.S, x=ds.x, y=ds.y, z=ds.z)
+            sources = load_dataset(source_path, layout=layout, sources_only=True)
+            self.assertIsNone(sources.u)
+            indices = np.array([1, 2])
+            save_predictions(pred_path, ds.u[indices], sources, indices,
+                             source_hashes(ds.S[indices]), {"total_seconds": 1}, "test.npz")
+            paired, pred = load_comparison(path, pred_path, realization=2)
+            np.testing.assert_array_equal(paired.u[0], ds.u[1])
+            np.testing.assert_array_equal(pred, ds.u[1])
+            with self.assertRaises(ValueError):
+                load_comparison(path, pred_path, realization=1)
+            np.savez(path, S=ds.S[::-1], u=ds.u, x=ds.x, y=ds.y, z=ds.z)
+            with self.assertRaisesRegex(ValueError, "sample order"):
+                load_comparison(path, pred_path, realization=3)
+
+    def test_timed_predictions_are_returned(self):
+        calls = []
+        def predict_fn(sources):
+            calls.append(len(sources))
+            return np.repeat(sources[..., None], 2, axis=-1)
+        predictor = SimpleNamespace(cfg=SimpleNamespace(batch_size=2), predict=predict_fn)
+        sources = np.ones((3, 4, 4), dtype=np.float32)
+        predictions, runtime = timed_prediction(predictor, sources)
+        self.assertEqual(calls, [1, 2, 3])  # warm both shapes, then time all samples
+        self.assertEqual(predictions.shape, (3, 4, 4, 2))
+        self.assertEqual(runtime["realizations"], 3)
+        self.assertGreater(runtime["total_seconds"], 0)
+
     def test_grouped_split(self):
         groups = np.repeat(np.arange(10), 3)
         splits = split_dataset(len(groups), seed=17, groups=groups)
@@ -115,6 +176,16 @@ class PipelineTests(unittest.TestCase):
             np.savez(source_path, x=sx, y=sy, source=original)
             np.savez(path, **coords, S=original.transpose(0, 2, 1), u=targets, N=3, axis_order="zyx")
             ds = load_dataset(path, layout={"format": "sol3d"})
+            only = load_dataset(path, layout={"format": "sol3d"}, sources_only=True)
+            self.assertIsNone(only.u)
+            np.testing.assert_array_equal(only.S, ds.S)
+            # Reconstruct from this file alone, with a deliberately missing companion.
+            standalone = load_dataset(path, layout={"format": "sol3d", "source_grid": "uniform_domain",
+                                                     "source_path": "does_not_exist.npz"}, sources_only=True)
+            np.testing.assert_array_equal(standalone.S, ds.S)
+            self.assertIsNone(standalone.metadata["source_file"])
+            self.assertIsNone(standalone.u)
+
             expected = x[1:-1, None] + 3 * y[None, 1:-1] + x[1:-1, None] * y[None, 1:-1]
             np.testing.assert_allclose(ds.S[0, 1:-1, 1:-1], expected, atol=1e-7)
             np.testing.assert_array_equal(ds.u, targets.transpose(0, 3, 2, 1))
