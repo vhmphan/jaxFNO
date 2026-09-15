@@ -35,7 +35,7 @@ All `.npz` and `.png` files, local environments, and checkpoints are ignored by 
 python train.py
 ```
 
-Training defaults to `uxyz_data.npz`. The source coordinates are reconstructed from `S.shape` within `uxyz_data.npz` and the physical domain endpoints in the NPZ. Best validation weights and the configuration, normalization scales, coordinates, sample splits, and dataset fingerprint are saved to `model/best_model.npz`. Loss curves and history are saved beside it. 
+Training defaults to `uxyz_data.npz`. The source coordinates are reconstructed from `S.shape` within `uxyz_data.npz` and the physical domain endpoints in the NPZ. Best validation weights and the configuration, coordinates, sample splits, and dataset fingerprint are saved to `model/best_model.npz`. Loss curves and history are saved beside it. 
 
 To customize training, save a JSON configuration and pass `--config config.json`:
 
@@ -61,7 +61,7 @@ python train.py --resume model/best_model.npz --epochs 50
 python train.py --resume --epochs 50
 ```
 
-`--epochs` is the maximum number of **additional** epochs in this invocation, not an absolute epoch number. The existing patience-based early stopping still applies. The saved weights, training/validation/test split, normalization scales, and architecture are reused. The training dataset must match the checkpoint's values, grid, and sample order. Use `--data PATH` if the same dataset was moved.
+`--epochs` is the maximum number of **additional** epochs in this invocation, not an absolute epoch number. The existing patience-based early stopping still applies. The saved weights, training/validation/test split and architecture are reused. The training dataset must match the checkpoint's values, grid, and sample order. Use `--data PATH` if the same dataset was moved.
 
 The checkpoint does not contain AdamW state, so continuation starts a fresh optimizer and a fresh early-stopping counter. It is not an exact restart of the interrupted optimizer trajectory. The starting checkpoint is validated before training; `best_model.npz` is replaced only if a lower validation loss is reached. Checkpoint writes use a temporary file and atomic replacement to protect the previous best if writing is interrupted.
 
@@ -73,7 +73,7 @@ The epoch display starts at 1 for the new run. Best checkpoints now record their
 python evaluate.py
 ```
 
-This reads **every source** from `uxyz_test.npz` and writes `uxyz_pred.npz`. The saved training normalization is reused. The input must use the checkpoint's physical domain and physics, but may use a different uniform grid resolution and number of source realizations.
+This reads **every source** from `uxyz_test.npz` and writes `uxyz_pred.npz`. Each source is divided by its own spatial mean, and predictions are multiplied by that mean. The input must use the checkpoint's physical domain and physics, but may use a different uniform grid resolution and number of source realizations.
 
 The original source grid is assumed uniform over the same physical x/y domain as the solver, as in the inspected source generator. The loader removes the solver's ghost coordinates and reconstructs source coordinates using `linspace(x[0], x[-1], S.shape[2])` and `linspace(y[0], y[-1], S.shape[1])`, since stored S has order `(N,Ny,Nx)`. It then applies the same linear interpolation onto the solver grid. Domain endpoints and axis orientation must match the checkpoint; the number of grid nodes may differ.
 
@@ -125,18 +125,7 @@ python plot_results.py --data uxyz_test.npz --predictions uxyz_pred.npz \
   --realization 2 --slice-x 1 --slice-y -2 --slice-z 0.5
 ```
 
-The figure contains the chosen solver-grid source and XY, XZ, YZ cross-sections
-of ground truth, FNO prediction, and signed error. These are slices, not integrated
-projections. Locations default to zero and select the nearest grid node. Reference
-and prediction share color limits per plane. XZ/YZ panels have the physical 20:8
-aspect ratio, with colorbars matching panel heights. Spatial axes are labeled kpc;
-x/y ticks are −10, −5, 0, 5, 10 and z ticks are −4, −2, 0, 2, 4 on the supplied grid.
-White source-panel guides mark the x/y slice locations. `--output DIR` changes
-the plot directory. By default, plots are saved in `model/` beside
-`plot_results.py` (created automatically if needed), and
-`uxyz_pred.npz` is saved beside `evaluate.py`, regardless
-of the working directory. Explicit relative `--output` paths use the working
-directory. Source hashes and coordinates are checked before comparison.
+The figure contains the chosen solver-grid source and XY, XZ, YZ cross-sections of ground truth, FNO prediction, and signed error. These are slices, not integrated projections. Locations default to zero and select the nearest grid node. Reference and prediction share color limits per plane. XZ/YZ panels have the physical 20:8 aspect ratio, with colorbars matching panel heights. Spatial axes are labeled kpc; x/y ticks are −10, −5, 0, 5, 10 and z ticks are −4, −2, 0, 2, 4 on the supplied grid. White source-panel guides mark the x/y slice locations. `--output DIR` changes the plot directory. By default, plots are saved in `model/` beside `plot_results.py` (created automatically if needed), and `uxyz_pred.npz` is saved beside `evaluate.py`, regardless of the working directory. Explicit relative `--output` paths use the working directory. Source hashes and coordinates are checked before comparison.
 
 ## Data preprocessing
 
@@ -146,7 +135,17 @@ For the supplied training data this produces `S: (10,129,129)` and `u: (10,129,1
 
 Inspect other formats with `python -m jaxfno.data FILE.npz`. Generic loaders require explicit `dataset_layout` source/target keys, x/y/z keys, axis orders, and units, boundary conditions, and `shared_bvp=true` in metadata. They reject incompatible shapes, nonfinite values, nonuniform grids, and ambiguous axes. The sol3d adapter is the only path that performs its specifically documented interpolation.
 
-Training splits independent samples 80/10/10 with seeded randomness. Supply `group_key` in the layout for related source variants; fractions then apply to groups. Global max-absolute normalization is fitted on training data only. Four GELU Fourier blocks retain signed x/y modes and one-sided z modes without overlap on small grids. Training uses AdamW, mean per-sample relative L2, minibatch device transfers, finite-gradient checks, and validation early stopping.
+Only per-realization source-mean normalization is supported. After loading and source interpolation, each pair is normalized as follows:
+
+```python
+S_mean = np.mean(S, axis=(1, 2), keepdims=True)
+S_normalized = S / S_mean
+u_normalized = u / S_mean[..., None]
+```
+
+The mean includes all loaded XY nodes, including the zero source perimeter. Means must be finite and nonzero. Evaluation computes the mean of each test source, feeds its normalized source to the network, and multiplies the output by that mean to save predictions in physical units. Checkpoints use the new format without global scaling constants. Previous checkpoint formats are unsupported: start fresh with `python train.py` without `--resume`. Subsequent runs can resume new-format checkpoints.
+
+Training splits independent samples 80/10/10 with seeded randomness. Supply `group_key` in the layout for related source variants; fractions then apply to groups. Four GELU Fourier blocks retain signed x/y modes and one-sided z modes without overlap on small grids. Training uses AdamW, mean per-sample relative L2, minibatch device transfers, finite-gradient checks, and validation early stopping.
 
 ## Unit checks and programmatic prediction
 

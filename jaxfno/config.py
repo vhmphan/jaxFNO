@@ -14,6 +14,7 @@ class FNOConfig:
     input_channels: int = 4
     output_channels: int = 1
     padding: int = 4
+    normalization: str = "source_mean"
     learning_rate: float = 1e-3
     batch_size: int = 1
     epochs: int = 200
@@ -28,6 +29,8 @@ class FNOConfig:
 
     def __post_init__(self):
         self.modes = tuple(self.modes)
+        if self.normalization != "source_mean":
+            raise ValueError("Only source_mean normalization is supported")
         if len(self.modes) != 3 or any(m < 1 for m in self.modes):
             raise ValueError("modes must contain three positive integers")
         if min(self.width, self.batch_size, self.epochs, self.patience) < 1:

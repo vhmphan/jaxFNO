@@ -72,3 +72,6 @@ residual loss. Do not claim accuracy on unseen grids without testing it.
 
 First summarize the observed data layout and any blocking missing information.
 Physical validation requires the paired numerical dataset.
+
+jax Gaussian Seidel -> 300 realizations -> 167.02 seconds
+

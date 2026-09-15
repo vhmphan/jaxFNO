@@ -9,11 +9,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaxfno.config import FNOConfig
-from jaxfno.data import Dataset, load_dataset
+from jaxfno.data import Dataset, load_dataset, source_means
 from jaxfno.evaluation_metrics import error_metrics, evaluate_model, linearity_diagnostics
 from evaluate import timed_prediction
-from jaxfno.fno import FourierBlock, make_model
-from train import Predictor, relative_l2_loss, split_dataset
+from jaxfno.fno import FourierBlock, make_model, predict
+from train import Predictor, relative_l2_loss, split_dataset, save_checkpoint, load_predictor
 
 
 class SourceIdentity(eqx.Module):
@@ -22,19 +22,50 @@ class SourceIdentity(eqx.Module):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_checkpoint_without_global_scales(self):
+        c = np.arange(3, dtype=np.float32)
+        S = np.ones((3, 3, 3), dtype=np.float32)
+        ds = Dataset(S, np.ones((3, 3, 3, 3), dtype=np.float32), c, c, c, {})
+        cfg = FNOConfig(width=2, modes=(1, 1, 1), padding=0)
+        model = make_model(cfg)
+        split = dict(zip(("train_idx", "val_idx", "test_idx"), split_dataset(3)))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.npz"
+            save_checkpoint(model, path, cfg, ds, split)
+            restored = load_predictor(path)
+            np.testing.assert_allclose(restored.predict(S[:1]), predict(model, S[:1], c, c, c))
+            with np.load(path) as saved:
+                self.assertNotIn("S_scale", saved.files)
+                self.assertNotIn("u_scale", saved.files)
+
+    def test_source_mean_normalization(self):
+        from unittest.mock import patch
+        c = np.arange(3, dtype=np.float32)
+        S = np.arange(1, 19, dtype=np.float32).reshape(2, 3, 3)
+        means = source_means(S)
+        np.testing.assert_allclose((S / means).mean(axis=(1, 2)), 1)
+        # A nonlinear stand-in distinguishes mean preprocessing from direct input.
+        with patch("jaxfno.fno.infer_batch", side_effect=lambda model, features, padding: features[:, 0] ** 2):
+            out = predict(None, S, c, c, c)
+            expected = np.broadcast_to((S ** 2 / means)[..., None], out.shape)
+            np.testing.assert_allclose(out, expected, rtol=1e-6)
+            single = predict(None, S[0], c, c, c)
+            np.testing.assert_allclose(single, expected[0], rtol=1e-6)
+        with self.assertRaisesRegex(ValueError, "nonzero"):
+            source_means(np.zeros((1, 3, 3)))
+
     def test_prediction_on_new_grid(self):
         cfg = FNOConfig(width=2, modes=(2, 2, 2), padding=2)
         coords = tuple(np.linspace(-limit, limit, size, dtype=np.float32)
                        for limit, size in zip((10, 10, 4), (5, 5, 3)))
         model = make_model(cfg)
-        operator = Predictor(model, cfg, {"S_scale": 2.0, "u_scale": 0.1}, coords, {}, {}, "")
+        operator = Predictor(model, cfg, coords, {}, {}, "")
         self.assertIs(operator.on_grid(*coords), operator)
         new_coords = tuple(np.linspace(-limit, limit, size, dtype=np.float32)
                            for limit, size in zip((10, 10, 4), (9, 9, 5)))
         refined = operator.on_grid(*new_coords)
         self.assertEqual(refined.inference_padding, (4, 4, 4))
         self.assertIs(refined.model, operator.model)
-        self.assertIs(refined.scales, operator.scales)
         self.assertIsNone(operator.inference_padding)
         pred = refined.predict(np.ones((1, 9, 9), dtype=np.float32))
         self.assertEqual(pred.shape, (1, 9, 9, 5))
@@ -133,13 +164,12 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sample order"):
                 load_dataset(path, layout={"format": "sol3d"})
 
-    def test_training_scales_used_for_evaluation(self):
+    def test_source_mean_restored_for_evaluation(self):
         c = np.arange(3, dtype=np.float32)
         S = np.full((3, 3, 3), 7.0, dtype=np.float32)
-        u = np.broadcast_to((S * 0.1)[..., None], (3, 3, 3, 3)).copy()
+        u = np.broadcast_to(S[..., None], (3, 3, 3, 3)).copy()
         ds = Dataset(S, u, c, c, c, {})
-        result = evaluate_model(SourceIdentity(), ds, FNOConfig(), np.arange(3),
-                                scales={"S_scale": 2.0, "u_scale": 0.2})
+        result = evaluate_model(SourceIdentity(), ds, FNOConfig(), np.arange(3))
         self.assertLess(result["global_rmse"], 1e-6)
         zero = np.zeros_like(u)
         metrics = error_metrics(np.ones_like(u), zero, np.zeros_like(S))

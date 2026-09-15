@@ -16,6 +16,7 @@ import optax
 from jaxfno.config import FNOConfig
 from jaxfno.data import Dataset, dataset_fingerprint, dataset_from_config, encode_source_features, inspect_npz, validate_coordinate
 from jaxfno.fno import infer_batch, make_model, predict
+from jaxfno.data import source_means
 
 
 def split_dataset(n, val_frac=0.1, test_frac=0.1, seed=0, groups=None):
@@ -51,15 +52,14 @@ def relative_l2_loss(pred, target, eps=1e-8):
     return jnp.mean(num / jnp.maximum(den, eps))
 
 
-def save_checkpoint(model, path, cfg, scales, dataset, split, *, fingerprint=None, training_progress=None):
+def save_checkpoint(model, path, cfg, dataset, split, *, fingerprint=None, training_progress=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     leaves = jax.tree_util.tree_leaves(model)
     flat = {f"leaf_{i}": np.asarray(leaf) for i, leaf in enumerate(leaves)}
-    flat.update(format_version=np.array(2), config=np.array(json.dumps(asdict(cfg))),
+    flat.update(format_version=np.array(3), config=np.array(json.dumps(asdict(cfg))),
                 dataset_fingerprint=np.array(fingerprint or dataset_fingerprint(dataset)),
                 dataset_metadata=np.array(json.dumps(dataset.metadata)),
-                **{k: np.asarray(v) for k, v in scales.items()},
                 **{a: getattr(dataset, a) for a in "xyz"},
                 **{k: np.asarray(v, dtype=np.int64) for k, v in split.items()})
     if dataset.groups is not None:
@@ -100,7 +100,6 @@ def load_checkpoint(model_template, path):
 class Predictor:
     model: object
     cfg: FNOConfig
-    scales: dict
     coordinates: tuple
     splits: dict
     metadata: dict
@@ -109,7 +108,7 @@ class Predictor:
     inference_padding: tuple[int, int, int] | None = None
 
     def on_grid(self, x, y, z):
-        """Reuse weights/scales on another uniform grid over the same domain.
+        """Reuse weights on another uniform grid over the same domain.
 
         Padding is scaled per axis to preserve its physical width, rounded to
         the nearest whole cell (half up). The checkpoint/model is not modified.
@@ -133,22 +132,21 @@ class Predictor:
 
     def predict(self, S):
         """S: (Nx,Ny) or (N,Nx,Ny); return u in saved physical units."""
-        return predict(self.model, S, *self.coordinates, self.scales["S_scale"],
-                       self.scales["u_scale"], self.cfg.batch_size, padding=self.inference_padding)
+        return predict(self.model, S, *self.coordinates, self.cfg.batch_size, padding=self.inference_padding)
 
 
 def load_predictor(path):
     with np.load(path, allow_pickle=False) as data:
-        if "format_version" not in data or int(data["format_version"]) != 2:
+        if "format_version" not in data or int(data["format_version"]) != 3:
             raise ValueError("Unsupported legacy checkpoint; retrain with the current code")
-        cfg = FNOConfig.from_dict(json.loads(str(data["config"].item())))
+        config_values = json.loads(str(data["config"].item()))
+        cfg = FNOConfig.from_dict(config_values)
         coords = tuple(data[a].copy() for a in "xyz")
-        scales = {k: float(data[k]) for k in ("S_scale", "u_scale")}
         splits = {k: data[k].copy() for k in ("train_idx", "val_idx", "test_idx")}
         metadata = json.loads(str(data["dataset_metadata"].item()))
         fingerprint = str(data["dataset_fingerprint"].item())
         groups = data["groups"].copy() if "groups" in data else None
-    return Predictor(load_checkpoint(make_model(cfg), path), cfg, scales, coords, splits, metadata, fingerprint, groups)
+    return Predictor(load_checkpoint(make_model(cfg), path), cfg, coords, splits, metadata, fingerprint, groups)
 
 
 def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = None):
@@ -157,9 +155,6 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
         train_idx, val_idx, test_idx = split_dataset(len(dataset.S), cfg.validation_fraction,
                                                     cfg.test_fraction, cfg.seed, dataset.groups)
         split = dict(train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
-        scales = {"S_scale": float(np.max(np.abs(dataset.S[train_idx]))),
-                  "u_scale": float(np.max(np.abs(dataset.u[train_idx])))}
-        scales = {k: v if v > 0 else 1.0 for k, v in scales.items()}
         model = make_model(cfg)
     else:
         if fingerprint != resume.fingerprint:
@@ -181,11 +176,10 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
                 or not np.array_equal(np.sort(indices), np.arange(len(dataset.S)))):
             raise ValueError("Invalid saved train/validation/test split")
         train_idx, val_idx, test_idx = (split[k] for k in ("train_idx", "val_idx", "test_idx"))
-        scales = dict(resume.scales)
-        if any(not np.isfinite(v) or v <= 0 for v in scales.values()):
-            raise ValueError("Invalid checkpoint normalization scales")
         model = resume.model
-        print("Continuing saved weights, splits, and scales with a fresh AdamW optimizer.", flush=True)
+        print("Continuing saved weights and splits with a fresh AdamW optimizer.", flush=True)
+    means = source_means(dataset.S)
+    print(f"Normalization: {cfg.normalization}", flush=True)
     optimizer = optax.adamw(cfg.learning_rate, weight_decay=cfg.weight_decay)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
@@ -200,8 +194,11 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
         return eqx.apply_updates(model, updates), state, loss, finite
 
     def batch(indices):
-        features = encode_source_features(dataset.S[indices], dataset.x, dataset.y, dataset.z, scales["S_scale"])
-        return jnp.asarray(features), jnp.asarray(dataset.u[indices] / scales["u_scale"])
+        sources, targets = dataset.S[indices], dataset.u[indices]
+        sources = sources / means[indices]
+        targets = targets / means[indices][..., None]
+        features = encode_source_features(sources, dataset.x, dataset.y, dataset.z)
+        return jnp.asarray(features), jnp.asarray(targets)
 
     def validation_loss(model):
         total = 0.0
@@ -228,7 +225,7 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
         print(f"Starting checkpoint validation loss: {best_val:.6g}", flush=True)
         # Keep a recoverable starting model even when writing to a new directory.
         if not (output / "best_model.npz").exists():
-            save_checkpoint(model, output / "best_model.npz", cfg, scales, dataset, split,
+            save_checkpoint(model, output / "best_model.npz", cfg, dataset, split,
                             fingerprint=fingerprint)
     history_path = output / ("continuation_history.json" if resume is not None else "history.json")
     rng = np.random.default_rng(cfg.seed)
@@ -248,7 +245,7 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
         improved_for_stopping = val_loss < best_val - cfg.min_delta
         if val_loss < best_val:
             best_val, best_model = val_loss, model
-            save_checkpoint(model, output / "best_model.npz", cfg, scales, dataset, split, fingerprint=fingerprint,
+            save_checkpoint(model, output / "best_model.npz", cfg, dataset, split, fingerprint=fingerprint,
                             training_progress={"epoch_in_run": epoch + 1, "validation_loss": val_loss,
                                                "continued_from_checkpoint": resume is not None})
         stale = 0 if improved_for_stopping else stale + 1
@@ -258,7 +255,7 @@ def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = 
             break
     from jaxfno.plots import plot_history
     plot_history(history, output / ("continuation_loss_curves.png" if resume is not None else "loss_curves.png"))
-    return best_model, {**scales, **split}
+    return best_model, split
 
 
 def main():

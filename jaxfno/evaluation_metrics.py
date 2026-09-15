@@ -33,9 +33,9 @@ def linearity_diagnostics(predict_fn, sources, floor=1e-8):
             "superposition_rel_l2": float(np.linalg.norm(summed - pa - pb) / max(np.linalg.norm(pa + pb), floor))}
 
 
-def evaluate_model(model, dataset, cfg, split, *, scales, output_dir=None,
+def evaluate_model(model, dataset, cfg, split, *, output_dir=None,
                    realization=None, slice_coordinates=(0.0, 0.0, 0.0), realization_subset=None):
-    """Require the fixed training scales; never fit scales to the test set."""
+    """Evaluate predictions restored using each source mean."""
     split = np.asarray(split, dtype=int)
     if split.ndim != 1 or len(split) == 0 or np.any(split < 0) or np.any(split >= len(dataset.S)):
         raise ValueError("Invalid or empty test split")
@@ -44,16 +44,13 @@ def evaluate_model(model, dataset, cfg, split, *, scales, output_dir=None,
         raise ValueError(f"realization must be between 0 and {len(dataset.S) - 1}")
     S_test, u_test = dataset.S[split], dataset.u[split]
     predict_fn = lambda S: predict(model, S, dataset.x, dataset.y, dataset.z,
-                                    scales["S_scale"], scales["u_scale"], cfg.batch_size)
+                                    cfg.batch_size)
     pred = predict_fn(S_test)
     if not np.isfinite(pred).all():
         raise FloatingPointError("Nonfinite predictions")
-    metrics = error_metrics(pred, u_test, S_test, cfg.loss_floor * scales["u_scale"])
+    metrics = error_metrics(pred, u_test, S_test, cfg.loss_floor)
     metrics["dataset_kind"] = dataset.metadata.get("kind", "physical")
-    if dataset.metadata.get("homogeneous_boundary_conditions") is True:
-        metrics["linearity"] = linearity_diagnostics(predict_fn, S_test, cfg.loss_floor * scales["u_scale"])
-    else:
-        metrics["linearity"] = "Skipped: homogeneous boundary conditions have not been confirmed."
+    metrics["linearity"] = "Skipped: zero-source diagnostic has undefined source-mean normalization."
     return metrics
 
 
@@ -80,5 +77,4 @@ def select_evaluation_indices(predictor, dataset, *, external=False, realization
             raise ValueError(f"--realization-range must satisfy 1 <= START <= END <= {len(dataset.S)}")
         return np.arange(start - 1, end)
     return np.arange(len(dataset.S)) if external else predictor.splits["test_idx"]
-
 

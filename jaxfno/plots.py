@@ -103,6 +103,8 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
     pred = np.asarray(pred)
     if pred.shape != ref.shape or not np.isfinite(pred).all():
         raise ValueError("Prediction must be finite and match the selected target shape")
+    # mask = ref > 1.0e-4 * np.nanmean(ref)
+    # mean_relative_error = np.nanmean(np.abs(ref[mask]-pred[mask])/ref[mask])
     indices = []
     for name, requested in zip("xyz", slice_coordinates):
         coord = getattr(dataset, name)
@@ -139,11 +141,18 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
             + f"Prediction resolution (Nx × Ny × Nz): {pred.shape[0]} × {pred.shape[1]} × {pred.shape[2]}\n"
             + "XY, XZ, YZ cross-sections at the labeled grid coordinates.\n"
             + "Ground truth and FNO share a color scale in each row.\n"
-            + ("Relative error = |FNO − ground truth| / ground truth (dimensionless).\n"
-               "Log color scale; zero ground truth and nonpositive errors are masked."
+            + ("Relative error = |FNO − ground truth| / ground truth (dimensionless).\n"            
                if relative_error else "Errors are FNO − ground truth, in dataset units."))
-    if dataset.metadata.get("layout", {}).get("format") == "sol3d":
-        info += "\nS is the interpolated solver-grid source; x, y, z are in kpc."
+    if relative_error:
+        valid = ref > 1.0e-4 * np.nanmean(ref)
+        if np.any(valid):
+            truth_values = np.asarray(ref[valid], dtype=np.float64)
+            relative_values = np.abs(np.asarray(pred[valid], dtype=np.float64) - truth_values) / truth_values
+            info += f"Mean relative error (full volume, nonzero truth): {np.mean(relative_values):.4g}"
+        else:
+            info += "Mean relative error: undefined (ground truth is zero everywhere)."
+    # if dataset.metadata.get("layout", {}).get("format") == "sol3d":
+    #     info += "\nS is the interpolated solver-grid source; x, y, z are in kpc."
     info_ax.text(0.05, 0.5, info, va="center", fontsize=12, linespacing=1.7)
     for row, (horizontal, vertical, truth, estimate, xlabel, ylabel, title) in enumerate(planes, 1):
         low, high = min(truth.min(), estimate.min()), max(truth.max(), estimate.max())
@@ -157,11 +166,7 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
         valid_error = np.ma.asarray(error).compressed()
         limit = max(float(np.abs(valid_error).max()), 1e-12) if valid_error.size else 1.0
         if relative_error:
-            log_low = float(valid_error.min()) if valid_error.size else 1e-6
-            log_high = float(valid_error.max()) if valid_error.size else 1.0
-            if log_high <= log_low:
-                log_low, log_high = log_low / 10, log_high * 10
-            error_norm = LogNorm(vmin=log_low, vmax=log_high)
+            error_norm = LogNorm(vmin=1e-3, vmax=10, clip=True)
         for col, (values, label) in enumerate(((truth, "Ground truth"), (estimate, "FNO"), (error, error_label))):
             ax = fig.add_subplot(grid[row, col])
             color_limits = ({"norm": error_norm} if relative_error else {"vmin": -limit, "vmax": limit}) if col == 2 else {"vmin": low, "vmax": high}

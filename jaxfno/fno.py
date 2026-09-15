@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jaxfno.data import encode_source_features
+from jaxfno.data import encode_source_features, source_means
 
 
 class PointwiseLayer(eqx.Module):
@@ -98,7 +98,7 @@ def infer_batch(model, features, padding=None):
     return jax.vmap(lambda x: model(x, padding=padding))(features)[:, 0]
 
 
-def predict(model, S, x, y, z, source_scale=1.0, target_scale=1.0, batch_size=1, *, padding=None):
+def predict(model, S, x, y, z, batch_size=1, *, padding=None):
     """Physical units; preserve a batch axis even for a batch of one sample."""
     S = np.asarray(S, dtype=np.float32)
     single = S.ndim == 2
@@ -106,11 +106,14 @@ def predict(model, S, x, y, z, source_scale=1.0, target_scale=1.0, batch_size=1,
         S = S[None]
     if S.ndim != 3 or len(S) == 0 or batch_size < 1:
         raise ValueError("Expected a nonempty source batch and positive batch_size")
-    if not np.isfinite(target_scale) or target_scale <= 0:
-        raise ValueError("target_scale must be finite and positive")
     outputs = []
     for start in range(0, len(S), batch_size):
-        features = encode_source_features(S[start:start + batch_size], x, y, z, source_scale)
-        outputs.append(np.asarray(infer_batch(model, jnp.asarray(features), padding)) * target_scale)
+        sources = S[start:start + batch_size]
+        means = source_means(sources)
+        sources = sources / means
+        features = encode_source_features(sources, x, y, z)
+        prediction = np.asarray(infer_batch(model, jnp.asarray(features), padding))
+        prediction = prediction * means[..., None]
+        outputs.append(prediction)
     result = np.concatenate(outputs)
     return result[0] if single else result

@@ -88,7 +88,18 @@ def inspect_npz(path: str | Path) -> dict[str, Any]:
     return summary
 
 
-def encode_source_features(S, x, y, z, source_scale=1.0):
+def source_means(S):
+    """Per-realization mean on the loaded XY grid, including boundary nodes."""
+    S = np.asarray(S, dtype=np.float32)
+    if S.ndim != 3 or not np.isfinite(S).all():
+        raise ValueError("Expected finite sources with shape (N, Nx, Ny)")
+    means = np.mean(S, axis=(1, 2), keepdims=True)
+    if not np.isfinite(means).all() or np.any(means == 0):
+        raise ValueError("Source-mean normalization requires finite, nonzero source means")
+    return means
+
+
+def encode_source_features(S, x, y, z):
     """(N,Nx,Ny) -> (N,4,Nx,Ny,Nz); z broadcast is encoding, not a volume source."""
     S = np.asarray(S, dtype=np.float32)
     if S.ndim == 2:
@@ -98,10 +109,8 @@ def encode_source_features(S, x, y, z, source_scale=1.0):
         validate_coordinate(coord, name)
     if S.ndim != 3 or S.shape[1:] != (len(x), len(y)) or not np.isfinite(S).all():
         raise ValueError("Source shape or values do not match the coordinate grid")
-    if not np.isfinite(source_scale) or source_scale <= 0:
-        raise ValueError("source_scale must be finite and positive")
     shape = (len(S), len(x), len(y), len(z))
-    source = np.broadcast_to(S[..., None] / source_scale, shape)
+    source = np.broadcast_to(S[..., None], shape)
     grid = np.meshgrid(*[(c - c.mean()) / np.ptp(c) for c in coords], indexing="ij")
     return np.stack([source, *[np.broadcast_to(c, shape) for c in grid]], axis=1).astype(np.float32)
 
