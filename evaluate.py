@@ -68,9 +68,9 @@ def main():
             layout.pop("source_path", None)
             layout["source_grid"] = "uniform_domain"
         dataset = load_dataset(args.data, layout=layout, sources_only=True)
-        for name, saved in zip("xyz", predictor.coordinates):
-            if not np.array_equal(getattr(dataset, name), saved):
-                raise ValueError(f"Input {name} grid differs from the checkpoint")
+        training_shape = tuple(len(c) for c in predictor.coordinates)
+        predictor = predictor.on_grid(dataset.x, dataset.y, dataset.z)
+        prediction_shape = tuple(len(c) for c in predictor.coordinates)
         for key in ("units", "boundary_conditions", "shared_bvp", "homogeneous_boundary_conditions",
                     "kind", "diffusion_coefficients", "lambda"):
             if dataset.metadata.get(key) != predictor.metadata.get(key):
@@ -82,8 +82,13 @@ def main():
         with np.load(args.data, allow_pickle=False) as data:
             hashes = source_hashes(original_sources(data, input_layout(dataset))[indices])
         print(f"Predicting {len(indices)} realizations ({start}–{end}); warming up...", flush=True)
+        padding = predictor.inference_padding or (predictor.model.padding,) * 3
+        print(f"Training grid: {training_shape}; prediction grid: {prediction_shape}; padding: {padding}", flush=True)
         predictions, runtime = timed_prediction(predictor, dataset.S[indices])
         runtime.update(data_file=args.data, realization_numbers=(indices + 1).tolist())
+        runtime.update(training_grid=training_shape, prediction_grid=prediction_shape,
+                       prediction_padding=padding,
+                       padding_policy="Training physical padding extent, rounded to nearest cell per axis")
         save_predictions(destination, predictions, dataset, indices, hashes, runtime, args.checkpoint)
     except (ValueError, FileNotFoundError, KeyError) as exc:
         parser.error(str(exc))

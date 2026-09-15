@@ -232,54 +232,17 @@ def _load_sol3d_dataset(path, layout, *, sources_only=False):
             groups = np.asarray(data[layout["group_key"]])
     return Dataset(S, None if target is None else target.transpose(0, 3, 2, 1), x, y, z, metadata, groups)
 
-def generate_synthetic_dataset(num_samples: int = 32, nx: int = 16, ny: int = 16, nz: int = 12, seed: int = 0) -> Dataset:
-    rng = np.random.default_rng(seed)
-    x = np.linspace(-1.0, 1.0, nx, dtype=np.float32)
-    y = np.linspace(-1.0, 1.0, ny, dtype=np.float32)
-    z = np.linspace(-1.0, 1.0, nz, dtype=np.float32)
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
-
-    S_all = np.zeros((num_samples, nx, ny), dtype=np.float32)
-    u_all = np.zeros((num_samples, nx, ny, nz), dtype=np.float32)
-    for n in range(num_samples):
-        field = np.zeros((nx, ny), dtype=np.float32)
-        for _ in range(4):
-            amp = rng.uniform(0.25, 1.5)
-            cx = rng.uniform(-0.6, 0.6)
-            cy = rng.uniform(-0.6, 0.6)
-            sx = rng.uniform(0.15, 0.45)
-            sy = rng.uniform(0.15, 0.45)
-            bump = amp * np.exp(-((X[:, :, 0] - cx) / sx) ** 2 - ((Y[:, :, 0] - cy) / sy) ** 2)
-            field += bump
-        field += 0.15 * np.sin(2.0 * np.pi * (X[:, :, 0] + 0.35 * Y[:, :, 0]))
-        field += 0.15 * np.cos(3.0 * np.pi * (Y[:, :, 0] - 0.25 * X[:, :, 0]))
-        S_all[n] = field
-        u_all[n] = field[:, :, None] * np.exp(-(Z[:, :, :] ** 2) / (0.45 ** 2))
-
-    return Dataset(
-        S=S_all,
-        u=u_all,
-        x=x,
-        y=y,
-        z=z,
-        metadata={"kind": "synthetic", "description": "synthetic smoke test for the JAX FNO pipeline."},
-    )
-
-
-def load_dataset(path: str | Path, *, layout=None, num_samples=32, grid=(16, 16, 12), seed=0, sources_only=False) -> Dataset:
-    if str(path) == "synthetic":
-        return generate_synthetic_dataset(num_samples, *grid, seed=seed)
+def load_dataset(path: str | Path, *, layout=None, sources_only=False) -> Dataset:
     dataset_path = Path(path)
     if not dataset_path.is_file():
-        raise FileNotFoundError(f"Dataset not found: {path}. Use 'synthetic' explicitly for a smoke test.")
+        raise FileNotFoundError(f"Dataset not found: {path}.")
     if dataset_path.suffix.lower() != ".npz":
         raise ValueError(f"Unsupported data format: {dataset_path.suffix}")
     return _load_npz_dataset(dataset_path, layout, sources_only=sources_only)
 
 
 def dataset_from_config(cfg):
-    return load_dataset(cfg.data_path, layout=cfg.dataset_layout, num_samples=cfg.synthetic_samples,
-                        grid=cfg.synthetic_grid, seed=cfg.seed)
+    return load_dataset(cfg.data_path, layout=cfg.dataset_layout)
 
 
 if __name__ == "__main__":

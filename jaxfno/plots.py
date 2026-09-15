@@ -9,7 +9,7 @@ from matplotlib.ticker import StrMethodFormatter
 
 
 def _coordinate_label(dataset, name):
-    return name if dataset.metadata.get("kind") == "synthetic" else f"{name} (kpc)"
+    return f"{name} (kpc)"
 
 
 def _format_coordinate_axis(axis, coord, name):
@@ -138,8 +138,6 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
             + "Errors are FNO − ground truth, in dataset units.")
     if dataset.metadata.get("layout", {}).get("format") == "sol3d":
         info += "\nS is the interpolated solver-grid source; x, y, z are in kpc."
-    if kind == "synthetic":
-        info += "\nSynthetic smoke test only; reference is not a PDE solution."
     info_ax.text(0.05, 0.5, info, va="center", fontsize=12, linespacing=1.7)
     for row, (horizontal, vertical, truth, estimate, xlabel, ylabel, title) in enumerate(planes, 1):
         low, high = min(truth.min(), estimate.min()), max(truth.max(), estimate.max())
@@ -150,7 +148,7 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
             im = ax.pcolormesh(horizontal, vertical, values.T, shading="auto",
                                cmap="RdBu_r" if col == 2 else "viridis",
                                vmin=-limit if col == 2 else low, vmax=limit if col == 2 else high)
-            ax.set_title(f"{label}: {title}" + (" kpc" if kind != "synthetic" else ""))
+            ax.set_title(f"{label}: {title} kpc")
             _format_plane(ax, dataset, horizontal, vertical, xlabel, ylabel)
             _panel_colorbar(fig, ax, im, label="u (dataset units)")
     number = index if display_realization is None else display_realization

@@ -73,13 +73,13 @@ class FourierNet(eqx.Module):
         self.project = PointwiseLayer(width, out_channels, key=keys[5])
         self.padding = padding
 
-    def __call__(self, x):
+    def __call__(self, x, *, padding=None):
         """Single sample: (4,Nx,Ny,Nz) -> (1,Nx,Ny,Nz)."""
         nx, ny, nz = x.shape[-3:]
         x = self.lift(x)
-        p = self.padding
-        if p:
-            x = jnp.pad(x, ((0, 0), (0, p), (0, p), (0, p)))
+        p = (self.padding,) * 3 if padding is None else padding
+        if any(p):
+            x = jnp.pad(x, ((0, 0), *((0, count) for count in p)))
         for block in self.blocks:
             x = block(x)
         return self.project(x[:, :nx, :ny, :nz])
@@ -92,11 +92,13 @@ def make_model(cfg, *, key=None):
 
 
 @eqx.filter_jit
-def infer_batch(model, features):
-    return jax.vmap(model)(features)[:, 0]
+def infer_batch(model, features, padding=None):
+    if padding is None:
+        return jax.vmap(model)(features)[:, 0]
+    return jax.vmap(lambda x: model(x, padding=padding))(features)[:, 0]
 
 
-def predict(model, S, x, y, z, source_scale=1.0, target_scale=1.0, batch_size=1):
+def predict(model, S, x, y, z, source_scale=1.0, target_scale=1.0, batch_size=1, *, padding=None):
     """Physical units; preserve a batch axis even for a batch of one sample."""
     S = np.asarray(S, dtype=np.float32)
     single = S.ndim == 2
@@ -109,6 +111,6 @@ def predict(model, S, x, y, z, source_scale=1.0, target_scale=1.0, batch_size=1)
     outputs = []
     for start in range(0, len(S), batch_size):
         features = encode_source_features(S[start:start + batch_size], x, y, z, source_scale)
-        outputs.append(np.asarray(infer_batch(model, jnp.asarray(features))) * target_scale)
+        outputs.append(np.asarray(infer_batch(model, jnp.asarray(features), padding)) * target_scale)
     result = np.concatenate(outputs)
     return result[0] if single else result

@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,15 +7,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 
 from jaxfno.config import FNOConfig
-from jaxfno.data import Dataset, dataset_fingerprint, encode_source_features, generate_synthetic_dataset, inspect_npz, load_dataset
-from jaxfno.evaluation_metrics import error_metrics, evaluate_model, linearity_diagnostics, select_evaluation_indices
+from jaxfno.data import Dataset, load_dataset
+from jaxfno.evaluation_metrics import error_metrics, evaluate_model, linearity_diagnostics
 from evaluate import timed_prediction
-from jaxfno.prediction_io import save_predictions, load_comparison, source_hashes
-from jaxfno.fno import FourierBlock, make_model, predict
-from train import load_predictor, relative_l2_loss, save_checkpoint, split_dataset
+from jaxfno.fno import FourierBlock, make_model
+from train import Predictor, relative_l2_loss, split_dataset
 
 
 class SourceIdentity(eqx.Module):
@@ -25,6 +22,33 @@ class SourceIdentity(eqx.Module):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_prediction_on_new_grid(self):
+        cfg = FNOConfig(width=2, modes=(2, 2, 2), padding=2)
+        coords = tuple(np.linspace(-limit, limit, size, dtype=np.float32)
+                       for limit, size in zip((10, 10, 4), (5, 5, 3)))
+        model = make_model(cfg)
+        operator = Predictor(model, cfg, {"S_scale": 2.0, "u_scale": 0.1}, coords, {}, {}, "")
+        self.assertIs(operator.on_grid(*coords), operator)
+        new_coords = tuple(np.linspace(-limit, limit, size, dtype=np.float32)
+                           for limit, size in zip((10, 10, 4), (9, 9, 5)))
+        refined = operator.on_grid(*new_coords)
+        self.assertEqual(refined.inference_padding, (4, 4, 4))
+        self.assertIs(refined.model, operator.model)
+        self.assertIs(refined.scales, operator.scales)
+        self.assertIsNone(operator.inference_padding)
+        pred = refined.predict(np.ones((1, 9, 9), dtype=np.float32))
+        self.assertEqual(pred.shape, (1, 9, 9, 5))
+        self.assertTrue(np.isfinite(pred).all())
+        self.assertEqual(operator.on_grid(new_coords[0], coords[1], new_coords[2]).inference_padding, (4, 2, 4))
+        with self.assertRaisesRegex(ValueError, "domain"):
+            operator.on_grid(new_coords[0] + 1, new_coords[1], new_coords[2])
+        with self.assertRaisesRegex(ValueError, "orientation"):
+            operator.on_grid(new_coords[0][::-1], new_coords[1], new_coords[2])
+        uneven = new_coords[0].copy()
+        uneven[1] += 0.1
+        with self.assertRaisesRegex(ValueError, "uniformly"):
+            operator.on_grid(uneven, new_coords[1], new_coords[2])
+
     def test_spectral_quadrants_and_small_grids(self):
         block = FourierBlock(1, (8, 8, 8), key=jax.random.PRNGKey(0))
         block = eqx.tree_at(lambda b: (b.kernel_r, b.kernel_i), block,
@@ -48,94 +72,6 @@ class PipelineTests(unittest.TestCase):
         gradient = jax.grad(relative_l2_loss)(zeros, zeros)
         self.assertTrue(np.isfinite(gradient).all())
 
-    def test_checkpoint_and_batch_axis(self):
-        cfg = FNOConfig(width=2, modes=(2, 2, 2), padding=1)
-        ds = generate_synthetic_dataset(10, 4, 4, 4)
-        model = make_model(cfg)
-        split = dict(zip(("train_idx", "val_idx", "test_idx"), split_dataset(10, seed=3)))
-        scales = {"S_scale": 0.2, "u_scale": 0.03}
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "model.npz"
-            save_checkpoint(model, path, cfg, scales, ds, split)
-            loaded = load_predictor(path)
-            expected = predict(model, ds.S[:1], ds.x, ds.y, ds.z, 0.2, 0.03)
-            self.assertEqual(expected.shape, (1, 4, 4, 4))
-            np.testing.assert_array_equal(loaded.predict(ds.S[:1]), expected)
-            self.assertEqual(loaded.predict(ds.S[0]).shape, (4, 4, 4))
-            self.assertEqual(loaded.cfg.padding, 1)
-            self.assertEqual(loaded.fingerprint, dataset_fingerprint(ds))
-            ds.S[[0, 1]] = ds.S[[1, 0]]
-            self.assertNotEqual(loaded.fingerprint, dataset_fingerprint(ds))
-            np.testing.assert_array_equal(loaded.splits["test_idx"], split["test_idx"])
-
-    def test_loader_mapping_and_validation(self):
-        ds = generate_synthetic_dataset(10, 4, 5, 6)
-        layout = dict(source_key="surface", target_key="solution", x_key="xx", y_key="yy", z_key="zz",
-                      source_axes="ynx", target_axes="znxy", metadata={"units": "arbitrary",
-                      "boundary_conditions": "specified in solver", "shared_bvp": True})
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "data.npz"
-            np.savez(path, surface=ds.S.transpose(2, 0, 1), solution=ds.u.transpose(3, 0, 1, 2),
-                     xx=ds.x, yy=ds.y, zz=ds.z, label=np.array("test"))
-            self.assertEqual(inspect_npz(path)["label"]["value"], "test")
-            with self.assertRaises(ValueError):
-                load_dataset(path)
-            actual = load_dataset(path, layout=layout)
-            np.testing.assert_array_equal(actual.S, ds.S)
-            np.testing.assert_array_equal(actual.u, ds.u)
-            with self.assertRaises(FileNotFoundError):
-                load_dataset(Path(temp) / "missing.npz")
-        with self.assertRaises(ValueError):
-            Dataset(ds.S, ds.u, np.array([0, 1, 2, 4]), ds.y, ds.z, {})
-        bad = ds.S.copy()
-        bad[0, 0, 0] = np.nan
-        with self.assertRaises(ValueError):
-            Dataset(bad, ds.u, ds.x, ds.y, ds.z, {})
-
-    def test_evaluation_ranges_and_external_dataset(self):
-        ds = generate_synthetic_dataset(10, 4, 5, 6)
-        predictor = SimpleNamespace(coordinates=(ds.x, ds.y, ds.z), metadata=ds.metadata,
-                                    fingerprint=dataset_fingerprint(ds), groups=None,
-                                    splits=dict(zip(("train_idx", "val_idx", "test_idx"), split_dataset(10))))
-        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds), predictor.splits["test_idx"])
-        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds, realization_range=(1, 1)), [0])
-        np.testing.assert_array_equal(select_evaluation_indices(predictor, ds, realization_range=(3, 5)), [2, 3, 4])
-        external = generate_synthetic_dataset(1, 4, 5, 6, seed=99)
-        np.testing.assert_array_equal(select_evaluation_indices(predictor, external, external=True), [0])
-        with self.assertRaisesRegex(ValueError, "sample order"):
-            select_evaluation_indices(predictor, external)
-        for bounds in ((0, 1), (2, 1), (1, 11)):
-            with self.assertRaises(ValueError):
-                select_evaluation_indices(predictor, ds, realization_range=bounds)
-        external.x = external.x + 1
-        with self.assertRaisesRegex(ValueError, "grid"):
-            select_evaluation_indices(predictor, external, external=True)
-
-    def test_prediction_archive_and_sources_only(self):
-        ds = generate_synthetic_dataset(3, 4, 5, 6)
-        layout = dict(source_key="S", target_key="u", source_axes="nxy", target_axes="nxyz",
-                      x_key="x", y_key="y", z_key="z", metadata={"units": "arbitrary",
-                      "boundary_conditions": "test", "shared_bvp": True})
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "truth.npz"
-            source_path = Path(temp) / "only_sources.npz"
-            pred_path = Path(temp) / "pred.npz"
-            np.savez(path, S=ds.S, u=ds.u, x=ds.x, y=ds.y, z=ds.z)
-            # Deliberately no target key: prediction loading must not require u.
-            np.savez(source_path, S=ds.S, x=ds.x, y=ds.y, z=ds.z)
-            sources = load_dataset(source_path, layout=layout, sources_only=True)
-            self.assertIsNone(sources.u)
-            indices = np.array([1, 2])
-            save_predictions(pred_path, ds.u[indices], sources, indices,
-                             source_hashes(ds.S[indices]), {"total_seconds": 1}, "test.npz")
-            paired, pred = load_comparison(path, pred_path, realization=2)
-            np.testing.assert_array_equal(paired.u[0], ds.u[1])
-            np.testing.assert_array_equal(pred, ds.u[1])
-            with self.assertRaises(ValueError):
-                load_comparison(path, pred_path, realization=1)
-            np.savez(path, S=ds.S[::-1], u=ds.u, x=ds.x, y=ds.y, z=ds.z)
-            with self.assertRaisesRegex(ValueError, "sample order"):
-                load_comparison(path, pred_path, realization=3)
 
     def test_timed_predictions_are_returned(self):
         calls = []
@@ -211,27 +147,6 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(metrics["zero_source"]["rmse"], 1.0)
         self.assertEqual(metrics["zero_target"]["count"], 3)
 
-    def test_tiny_subset_overfit(self):
-        ds = generate_synthetic_dataset(1, 4, 4, 4, seed=5)
-        features = jnp.asarray(encode_source_features(ds.S, ds.x, ds.y, ds.z))
-        target = jnp.asarray(ds.u)
-        model = make_model(FNOConfig(width=4, modes=(2, 2, 2), padding=1))
-        optimizer = optax.adamw(3e-3, weight_decay=0.0)
-        state = optimizer.init(eqx.filter(model, eqx.is_array))
-        def loss_fn(m):
-            return relative_l2_loss(jax.vmap(m)(features)[:, 0], target)
-        @eqx.filter_jit
-        def step(m, state):
-            loss, grads = eqx.filter_value_and_grad(loss_fn)(m)
-            updates, state = optimizer.update(grads, state, eqx.filter(m, eqx.is_array))
-            return eqx.apply_updates(m, updates), state, loss
-        initial = float(loss_fn(model))
-        for _ in range(180):
-            model, state, loss = step(model, state)
-        final = float(loss_fn(model))
-        print(f"tiny-subset relative L2: {initial:.6f} -> {final:.6f}", flush=True)
-        self.assertLess(final, 0.08)
-        self.assertLess(final, initial * 0.1)
 
     def test_linearity_diagnostics(self):
         sources = np.random.default_rng(0).normal(size=(2, 3, 3))

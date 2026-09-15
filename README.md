@@ -8,8 +8,7 @@ This might be later adapted for the physical case of infering the distribution o
 
 ## Project layout
 
-The top level contains the three command scripts, this README, and the two input
-NPZ files. Supporting files are organized as follows:
+The top level contains the three command scripts, this README, and the two input NPZ files. Supporting files are organized as follows:
 
 - `jaxfno/`: model, data loading, configuration, plotting, prediction archive I/O,
   and optional accuracy helpers.
@@ -19,13 +18,7 @@ NPZ files. Supporting files are organized as follows:
 - `model/`: trained checkpoints, loss curves, and training history (comparison plots
   default to `model/`).
 
-Run commands from the project directory. Hidden `.git/`, `.gitignore`, and
-`.venv/` remain in place for version control and the existing environment.
-Training automatically creates `model/` beside `train.py` and saves
-`model/best_model.npz`; evaluation loads that file by default. The existing trained
-checkpoint has been copied there from `artifacts/`. Explicit `checkpoint_dir`
-settings remain supported; relative paths are resolved beside `train.py`.
-Synthetic smoke training uses `model/smoke/` to preserve the physical model.
+Run commands from the project directory. Hidden `.git/`, `.gitignore`, and `.venv/` remain in place for version control and the existing environment. Training automatically creates `model/` beside `train.py` and saves `model/best_model.npz`; evaluation loads that file by default. The existing trained checkpoint has been copied there from `artifacts/`. Explicit `checkpoint_dir` settings remain supported; relative paths are resolved beside `train.py`.
 
 ## Setup
 
@@ -35,8 +28,7 @@ source .venv/bin/activate
 python -m pip install -r support/requirements.txt
 ```
 
-All `.npz` and `.png` files, local environments, and checkpoints are ignored by
-Git. Supply datasets and a trained checkpoint locally.
+All `.npz` and `.png` files, local environments, and checkpoints are ignored by Git. Supply datasets and a trained checkpoint locally.
 
 ## Train
 
@@ -44,12 +36,7 @@ Git. Supply datasets and a trained checkpoint locally.
 python train.py
 ```
 
-Training defaults to `uxyz_data.npz`, using the inspected `sol3D.py` export
-format. No companion source file is needed: the uniform source coordinates are
-reconstructed from `S.shape` and the physical domain endpoints in the NPZ. Best validation weights and the configuration,
-normalization scales, coordinates, sample splits, and dataset fingerprint are
-saved to `model/best_model.npz`. Loss curves and history are saved
-beside it. No new PDE solver or residual loss is used.
+Training defaults to `uxyz_data.npz`. The source coordinates are reconstructed from `S.shape` and the physical domain endpoints in the NPZ. Best validation weights and the configuration, normalization scales, coordinates, sample splits, and dataset fingerprint are saved to `model/best_model.npz`. Loss curves and history are saved beside it. 
 
 To customize training, save a JSON configuration and pass `--config config.json`:
 
@@ -67,46 +54,42 @@ To customize training, save a JSON configuration and pass `--config config.json`
 }
 ```
 
+## Continue training from the best checkpoint
+
+```bash
+python train.py --resume model/best_model.npz --epochs 50
+# Equivalent for the default checkpoint:
+python train.py --resume --epochs 50
+```
+
+`--epochs` is the maximum number of **additional** epochs in this invocation, not an absolute epoch number. The existing patience-based early stopping still applies. The saved weights, training/validation/test split, normalization scales, and architecture are reused. The training dataset must match the checkpoint's values, grid, and sample order. Use `--data PATH` if the same dataset was moved.
+
+The checkpoint does not contain AdamW state, so continuation starts a fresh optimizer and a fresh early-stopping counter. It is not an exact restart of the interrupted optimizer trajectory. The starting checkpoint is validated before training; `best_model.npz` is replaced only if a lower validation loss is reached. Checkpoint writes use a temporary file and atomic replacement to protect the previous best if writing is interrupted.
+
+The epoch display starts at 1 for the new run. Best checkpoints now record their epoch within that run and validation loss. Continuation losses are saved after every completed epoch in `continuation_history.json`; the finished run writes `continuation_loss_curves.png` in the checkpoint directory. Original training history is kept. To change optimization settings, supply `--config config.json` as well; model architecture must remain compatible. `--epochs` also overrides the epoch limit for a fresh run without `--resume`.
+
 ## Predict all sources and measure runtime
 
 ```bash
 python evaluate.py
 ```
 
-This reads **every source** from `uxyz_test.npz` and writes `uxyz_pred.npz`.
-It does **not read ground-truth u, compute accuracy metrics, or plot anything**.
-The saved training normalization is reused. The input must use the checkpoint's
-grid and physics, but may contain a different number of source realizations.
+This reads **every source** from `uxyz_test.npz` and writes `uxyz_pred.npz`. The saved training normalization is reused. The input must use the checkpoint's physical domain and physics, but may use a different uniform grid resolution and number of source realizations.
 
-For sol3d exports, prediction uses only `--data`; no companion source file is
-needed. The original source grid is assumed uniform over the same physical x/y
-domain as the solver, as in the inspected source generator. The loader removes
-the solver's ghost coordinates and reconstructs source coordinates using
-`linspace(x[0], x[-1], S.shape[2])` and
-`linspace(y[0], y[-1], S.shape[1])`, since stored S has order `(N,Ny,Nx)`.
-It then applies the same linear interpolation onto the solver grid. Both the
-coordinate values and grid dimensions must match the saved checkpoint.
+The original source grid is assumed uniform over the same physical x/y domain as the solver, as in the inspected source generator. The loader removes the solver's ghost coordinates and reconstructs source coordinates using `linspace(x[0], x[-1], S.shape[2])` and `linspace(y[0], y[-1], S.shape[1])`, since stored S has order `(N,Ny,Nx)`. It then applies the same linear interpolation onto the solver grid. Domain endpoints and axis orientation must match the checkpoint; the number of grid nodes may differ.
 
 ```bash
 python evaluate.py --data uxyz_test.npz --output uxyz_pred.npz
 ```
 
-Existing checkpoints that name a training `source_path` remain compatible;
-both prediction and training ignore that path for sol3d exports.
-Prediction works without a `u` array. An optional one-based inclusive range is
+Prediction works without a `u` array. An optional one inclusive range is
 still available:
 
 ```bash
 python evaluate.py --data uxyz_test.npz --realization-range 1 10
 ```
 
-Runtime measures the prediction pass that produces the saved arrays, after a
-warm-up for every minibatch shape. It includes feature encoding, normalization,
-CPU/device transfers, FNO computation, and output rescaling. Returning NumPy
-arrays synchronizes JAX device work before the timer stops. Dataset loading,
-source-grid interpolation, warm-up/JIT compilation, and NPZ writing are excluded.
-The console reports total and per-realization seconds. Details including device,
-batch size, throughput, and separate warm-up time are saved inside the prediction archive. No separate runtime JSON file is written.
+Runtime measures the prediction pass that produces the saved arrays, after a warm-up for every minibatch shape. It includes feature encoding, normalization, CPU/device transfers, FNO computation, and output rescaling. Returning NumPy arrays synchronizes JAX device work before the timer stops. Dataset loading, source-grid interpolation, warm-up/JIT compilation, and NPZ writing are excluded. The console reports total and per-realization seconds. Details including device, batch size, throughput, and separate warm-up time are saved inside the prediction archive. No separate runtime JSON file is written.
 
 The prediction NPZ contains:
 
@@ -116,16 +99,27 @@ The prediction NPZ contains:
 - `sample_indices`: zero-based indices in the original input file.
 - Source hashes, original file layout, metadata, checkpoint path, and runtime.
 
+## Prediction on another grid resolution
+
+The same command supports, for example, training on 129×129×65 and predicting on 257×257×129 over the same physical domain:
+
+```bash
+python evaluate.py --data uxyz_test.npz --realization-range 1 10
+```
+
+The loader uses the test file's x/y/z coordinates (after removing ghost nodes). It reconstructs and interpolates the source onto that test x/y grid. The FNO uses those coordinates with the original checkpoint weights and training normalization; no retraining or interpolation of predicted u is performed. Uniform spacing, domain endpoints, axis orientation, and physics metadata are validated. Changing the physical domain is rejected.
+
+Padding is adjusted independently on each axis according to `round_half_up(training_padding * (N_test - 1) / (N_train - 1))`. Thus four training padding cells become eight when grid intervals are doubled. This preserves the physical padding extent to the nearest test-grid cell; Fourier mode counts remain unchanged. The training grid, prediction grid, and padding are printed and recorded with runtime metadata in the prediction NPZ. Same-grid inference retains its previous behavior.
+
+Use `plot_results.py` with ground truth on the **same test grid** to inspect the result. Higher resolution increases memory/runtime and does not guarantee better accuracy. Resolution transfer must be validated against the finer-grid numerical solutions; it is not a claim of physical accuracy.
+
 ## Plot ground truth versus saved predictions
 
 ```bash
 python plot_results.py --realization 1
 ```
 
-This reads `uxyz_test.npz` and `uxyz_pred.npz` and produces
-`model/realization_1_comparison.png`. **It does not load the model or
-run inference**, and it does not need the paired source file. Realization numbers
-are **one-based**, including the figure title and filename.
+This reads `uxyz_test.npz` and `uxyz_pred.npz` and produces `model/realization_1_comparison.png`. **It does not load the model or run inference**, and it does not need the paired source file. Realization numbers are **one-based**, including the figure title and filename.
 
 ```bash
 python plot_results.py --data uxyz_test.npz --predictions uxyz_pred.npz \
@@ -147,131 +141,29 @@ directory. Source hashes and coordinates are checked before comparison.
 
 ## Data preprocessing
 
-The supplied sol3d export stores `S` as `(N,Ny,Nx)` and `u` as `(N,Nz,Ny,Nx)`.
-Coordinates include one ghost cell at each end, but the saved solution already
-excludes those ghosts. The loader trims coordinates only, transposes u to nxyz,
-and reproduces the generator's linear source interpolation onto interior x/y
-nodes. The unused source perimeter is zero, as in the solver RHS. S retains its
-surface amplitude; the RHS factor `-1/dz` is not part of the input encoding.
+The supplied data export stores `S` as `(N,Ny,Nx)` and `u` as `(N,Nz,Ny,Nx)`. Coordinates include one ghost cell at each end, but the saved solution already excludes those ghosts. The loader trims coordinates only, transposes u to nxyz, and reproduces the generator's linear source interpolation onto interior x/y nodes. The unused source perimeter is zero, as in the solver RHS. S retains its surface amplitude; the RHS factor `-1/dz` is not part of the input encoding.
 
-For the supplied training data this produces `S: (10,129,129)` and
-`u: (10,129,129,65)`, on x,y ∈ [−10,10], z ∈ [−4,4]. The inspected solver uses
-D=1, lambda=0, and homogeneous Dirichlet conditions on all six faces. Padding
-reduces Fourier wraparound coupling; it does not enforce boundary conditions.
+For the supplied training data this produces `S: (10,129,129)` and `u: (10,129,129,65)`, on x,y ∈ [−10,10], z ∈ [−4,4]. The inspected solver uses D=1, lambda=0, and homogeneous Dirichlet conditions on all six faces. Padding reduces Fourier wraparound coupling; it does not enforce boundary conditions.
 
-Inspect other formats with `python -m jaxfno.data FILE.npz`. Generic loaders require
-explicit `dataset_layout` source/target keys, x/y/z keys, axis orders, and units,
-boundary conditions, and `shared_bvp=true` in metadata. They reject incompatible
-shapes, nonfinite values, nonuniform grids, and ambiguous axes. The sol3d adapter
-is the only path that performs its specifically documented interpolation.
+Inspect other formats with `python -m jaxfno.data FILE.npz`. Generic loaders require explicit `dataset_layout` source/target keys, x/y/z keys, axis orders, and units, boundary conditions, and `shared_bvp=true` in metadata. They reject incompatible shapes, nonfinite values, nonuniform grids, and ambiguous axes. The sol3d adapter is the only path that performs its specifically documented interpolation.
 
-Training splits independent samples 80/10/10 with seeded randomness. Supply
-`group_key` in the layout for related source variants; fractions then apply to
-groups. Global max-absolute normalization is fitted on training data only. Four
-GELU Fourier blocks retain signed x/y modes and one-sided z modes without overlap
-on small grids. Training uses AdamW, mean per-sample relative L2, minibatch device
-transfers, finite-gradient checks, and validation early stopping.
+Training splits independent samples 80/10/10 with seeded randomness. Supply `group_key` in the layout for related source variants; fractions then apply to groups. Global max-absolute normalization is fitted on training data only. Four GELU Fourier blocks retain signed x/y modes and one-sided z modes without overlap on small grids. Training uses AdamW, mean per-sample relative L2, minibatch device transfers, finite-gradient checks, and validation early stopping.
 
-## Smoke test and programmatic prediction
+## Unit checks and programmatic prediction
 
 ```bash
-python train.py --synthetic
 python -m unittest discover -s support/tests -v
 ```
 
-Synthetic targets are a source multiplied by a Gaussian vertical envelope, not
-PDE solutions. These checks do not establish physical accuracy or unseen-grid
-generalization. Optional metric helpers live in `jaxfno/evaluation_metrics.py`; the
-prediction CLI does not call them.
+These numerical unit checks do not establish physical accuracy or unseen-grid generalization. Optional metric helpers live in `jaxfno/evaluation_metrics.py`; the prediction CLI does not call them.
 
 ```python
 from train import load_predictor
 operator = load_predictor("model/best_model.npz")
-u = operator.predict(S)  # solver-grid S: (Nx,Ny) -> u: (Nx,Ny,Nz)
+u = operator.predict(S)  # training-grid S: (Nx,Ny) -> u: (Nx,Ny,Nz)
+# For a different grid over the same domain:
+# operator = operator.on_grid(x_test, y_test, z_test)
+# u_test = operator.predict(S_on_test_grid)
 ```
 
-Batches preserve their batch axis, including N=1. For sol3d checkpoints this API
-expects the preprocessed 129×129 source, not the raw 101×101 source. The prediction
-CLI performs that preprocessing automatically.
-
-## Original scientific brief
-
-The original brief is preserved below for scientific context. The current usage
-above reflects subsequent changes: source-grid reconstruction, separate prediction
-and plotting commands, the renamed input files, and the reorganized directories.
-
-### Codex task: FNO for Galactic cosmic-ray diffusion
-
-Build a minimal Python project using **JAX, Equinox, and Optax** to learn
-`S(x,y) -> u(x,y,z)` from N paired numerical solutions in `data_uxyz.npz`:
-
-$$-\left(\frac{\partial^2u}{\partial x^2}+\frac{\partial^2u}{\partial y^2}+\frac{\partial^2u}{\partial z^2}\right)=S(x,y)\delta(z).$$
-
-This is steady, homogeneous, isotropic diffusion with the constant coefficient
-absorbed into the normalization. No diffusion-coefficient input is needed.
-N is the number of independent samples, not the number of optimizer minibatches.
-
-#### 1. Inspect and load data
-
-- Use NumPy to inspect NPZ keys, shapes, dtypes, and coordinates before coding
-  the loader. Do not assume the file's key names or axis order.
-- Map to `S: (N,Nx,Ny)`, `u: (N,Nx,Ny,Nz)`, and coordinate vectors `x,y,z`.
-  Validate pairing, finite values, axis order, and a shared uniform Cartesian
-  grid. Do not blindly reshape flattened coordinates or silently interpolate.
-- If source maps are absent, request their file or the exact source-generation
-  parameters and sample correspondence. Do not fabricate sources from u.
-- Determine domain, units, and boundary conditions from metadata or solver code;
-  ask if unavailable. Use the same uniquely specified boundary-value problem
-  for all samples. Do not assume periodic boundaries.
-
-#### 2. Implement a 3D FNO
-
-- Broadcast each surface source S along z, then concatenate normalized x,y,z
-  coordinates: four input channels. This is an encoding of the 2D source,
-  not a physical replacement of the delta function by a volume source.
-- Use pointwise lifting, four Fourier blocks (spectral convolution + pointwise
-  linear path, followed by GELU), and pointwise projection to one u channel.
-- Start with width 16 and up to 8 Fourier modes per axis; make these configurable.
-  Use channel-first arrays internally and document all shape conversions.
-- Implement spectral layers with `jnp.fft.rfftn/irfftn` over spatial axes only.
-  Retain positive/negative modes on the first two axes and one-sided modes on
-  the last; prevent overlapping slices on small grids. Specify inverse shape.
-  Store real/imaginary trainable weights as separate real arrays.
-- Support configurable padding and crop back to the original grid for
-  nonperiodic domains. Padding does not enforce boundary conditions; enforce
-  boundary values only when the actual geometry and prescribed values permit it.
-
-#### 3. Train and evaluate
-
-- Seed all randomness. Split complete samples 80/10/10 into train/validation/test;
-  keep related source variants together and ensure nonempty splits.
-- Fit fixed global source/target normalization scales on training data only;
-  preserve amplitude information and save the scales. Do not normalize each
-  sample independently.
-- Train using mean per-sample relative L2 loss with a denominator floor, AdamW
-  (initial learning rate 1e-3), configurable batch size (start 1), up to 200
-  epochs, and validation early stopping. Save the best validation checkpoint.
-- Use `eqx.filter_jit`, `eqx.filter_value_and_grad`, and `jax.vmap` for training
-  and batched inference. Keep NumPy/file I/O outside compiled functions and
-  transfer minibatches rather than the full dataset to the accelerator.
-- Evaluate the selected model on held-out test samples in physical units:
-  mean/median/worst relative L2 and global RMSE. Report absolute errors for
-  zero-source targets separately.
-- Save loss curves and reference/prediction/error slices near z=0 and off-plane,
-  plus vertical profiles. Share color limits between reference and prediction.
-- Verify finite gradients, output shapes, tiny-subset overfitting, and checkpoint
-  reload agreement. For homogeneous boundary conditions, also check zero-source,
-  amplitude-scaling, and superposition errors: the true operator is linear,
-  whereas an ordinary FNO does not enforce linearity.
-
-#### 4. Deliver
-
-Provide `data.py`, `fno.py`, `train.py`, `evaluate.py`, configuration, requirements,
-and a short README with exact commands. Save model configuration, normalization,
-coordinates, and split indices with the checkpoint. Expose `predict(S)` returning
-u in physical units. Keep training supervised; no new diffusion solver or physics
-residual loss. Do not claim accuracy on unseen grids without testing it.
-
-First summarize the observed data layout and any blocking missing information,
-then implement and run a smoke test. If the dataset is unavailable, provide a
-clearly labeled synthetic smoke test without claiming physical validation.
+Batches preserve their batch axis, including N=1. For sol3d checkpoints this API expects the preprocessed 129×129 source, not the raw 101×101 source. The prediction CLI performs that preprocessing automatically.

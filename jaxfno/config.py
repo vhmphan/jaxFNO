@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass
 class FNOConfig:
-    data_path: str = "synthetic"
+    data_path: str = "uxyz_data.npz"
     dataset_layout: dict = field(default_factory=dict)
     width: int = 16
     modes: tuple[int, int, int] = (8, 8, 8)
@@ -25,16 +25,11 @@ class FNOConfig:
     validation_fraction: float = 0.1
     test_fraction: float = 0.1
     checkpoint_dir: str = field(default_factory=lambda: str(Path(__file__).resolve().parent.parent / "model"))
-    synthetic_samples: int = 32
-    synthetic_grid: tuple[int, int, int] = (16, 16, 12)
 
     def __post_init__(self):
         self.modes = tuple(self.modes)
-        self.synthetic_grid = tuple(self.synthetic_grid)
         if len(self.modes) != 3 or any(m < 1 for m in self.modes):
             raise ValueError("modes must contain three positive integers")
-        if len(self.synthetic_grid) != 3 or min(self.synthetic_grid) < 2:
-            raise ValueError("synthetic_grid must contain three sizes >= 2")
         if min(self.width, self.batch_size, self.epochs, self.patience) < 1:
             raise ValueError("width, batch_size, epochs, and patience must be positive")
         if self.padding < 0 or self.learning_rate <= 0 or self.loss_floor <= 0:
@@ -51,5 +46,14 @@ class FNOConfig:
         Path(path).write_text(json.dumps(asdict(self), indent=2, sort_keys=True))
 
     @classmethod
+    def from_dict(cls, values: dict) -> "FNOConfig":
+        # Old physical checkpoints/configs included these unused demo fields.
+        # Discard only those obsolete fields; keep rejecting other unknown keys.
+        values = dict(values)
+        values.pop("synthetic_samples", None)
+        values.pop("synthetic_grid", None)
+        return cls(**values)
+
+    @classmethod
     def load(cls, path: str | Path) -> "FNOConfig":
-        return cls(**json.loads(Path(path).read_text()))
+        return cls.from_dict(json.loads(Path(path).read_text()))

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass
+import os
+import tempfile
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import equinox as eqx
@@ -12,7 +14,7 @@ import numpy as np
 import optax
 
 from jaxfno.config import FNOConfig
-from jaxfno.data import Dataset, dataset_fingerprint, dataset_from_config, encode_source_features, inspect_npz
+from jaxfno.data import Dataset, dataset_fingerprint, dataset_from_config, encode_source_features, inspect_npz, validate_coordinate
 from jaxfno.fno import infer_batch, make_model, predict
 
 
@@ -49,7 +51,7 @@ def relative_l2_loss(pred, target, eps=1e-8):
     return jnp.mean(num / jnp.maximum(den, eps))
 
 
-def save_checkpoint(model, path, cfg, scales, dataset, split, *, fingerprint=None):
+def save_checkpoint(model, path, cfg, scales, dataset, split, *, fingerprint=None, training_progress=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     leaves = jax.tree_util.tree_leaves(model)
@@ -62,7 +64,20 @@ def save_checkpoint(model, path, cfg, scales, dataset, split, *, fingerprint=Non
                 **{k: np.asarray(v, dtype=np.int64) for k, v in split.items()})
     if dataset.groups is not None:
         flat["groups"] = dataset.groups
-    np.savez(path, **flat)
+    if training_progress is not None:
+        flat["training_progress"] = np.array(json.dumps(training_progress))
+    # Publish a complete archive atomically so interruption cannot corrupt best.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False) as handle:
+            temporary = Path(handle.name)
+            np.savez(handle, **flat)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def load_checkpoint(model_template, path):
@@ -91,18 +106,42 @@ class Predictor:
     metadata: dict
     fingerprint: str
     groups: np.ndarray | None = None
+    inference_padding: tuple[int, int, int] | None = None
+
+    def on_grid(self, x, y, z):
+        """Reuse weights/scales on another uniform grid over the same domain.
+
+        Padding is scaled per axis to preserve its physical width, rounded to
+        the nearest whole cell (half up). The checkpoint/model is not modified.
+        """
+        coordinates = tuple(np.asarray(c, dtype=np.float32) for c in (x, y, z))
+        padding = []
+        old_padding = self.inference_padding or (self.model.padding,) * 3
+        for name, old, new, cells in zip("xyz", self.coordinates, coordinates, old_padding):
+            validate_coordinate(old, f"training {name}")
+            validate_coordinate(new, f"prediction {name}")
+            span = abs(float(old[-1]) - float(old[0]))
+            # Tolerate only coordinate representation roundoff, not domain shifts.
+            tolerance = 8 * np.finfo(np.float32).eps * max(span, abs(float(old[0])), abs(float(old[-1])))
+            if not np.allclose(new[[0, -1]], np.asarray(old)[[0, -1]], rtol=0, atol=tolerance):
+                raise ValueError(f"Input {name} domain or axis orientation differs from the checkpoint")
+            ratio = (len(new) - 1) / (len(old) - 1)
+            padding.append(int(np.floor(cells * ratio + 0.5)))
+        if all(np.array_equal(a, b) for a, b in zip(self.coordinates, coordinates)):
+            return self
+        return replace(self, coordinates=coordinates, inference_padding=tuple(padding))
 
     def predict(self, S):
         """S: (Nx,Ny) or (N,Nx,Ny); return u in saved physical units."""
         return predict(self.model, S, *self.coordinates, self.scales["S_scale"],
-                       self.scales["u_scale"], self.cfg.batch_size)
+                       self.scales["u_scale"], self.cfg.batch_size, padding=self.inference_padding)
 
 
 def load_predictor(path):
     with np.load(path, allow_pickle=False) as data:
         if "format_version" not in data or int(data["format_version"]) != 2:
             raise ValueError("Unsupported legacy checkpoint; retrain with the current code")
-        cfg = FNOConfig(**json.loads(str(data["config"].item())))
+        cfg = FNOConfig.from_dict(json.loads(str(data["config"].item())))
         coords = tuple(data[a].copy() for a in "xyz")
         scales = {k: float(data[k]) for k in ("S_scale", "u_scale")}
         splits = {k: data[k].copy() for k in ("train_idx", "val_idx", "test_idx")}
@@ -112,16 +151,41 @@ def load_predictor(path):
     return Predictor(load_checkpoint(make_model(cfg), path), cfg, scales, coords, splits, metadata, fingerprint, groups)
 
 
-def train_model(cfg: FNOConfig, dataset: Dataset):
-    train_idx, val_idx, test_idx = split_dataset(len(dataset.S), cfg.validation_fraction,
-                                                cfg.test_fraction, cfg.seed, dataset.groups)
-    split = dict(train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
+def train_model(cfg: FNOConfig, dataset: Dataset, *, resume: Predictor | None = None):
     fingerprint = dataset_fingerprint(dataset)
-    # Global training-only max-absolute scales; retain small physical amplitudes.
-    scales = {"S_scale": float(np.max(np.abs(dataset.S[train_idx]))),
-              "u_scale": float(np.max(np.abs(dataset.u[train_idx])))}
-    scales = {k: v if v > 0 else 1.0 for k, v in scales.items()}
-    model = make_model(cfg)
+    if resume is None:
+        train_idx, val_idx, test_idx = split_dataset(len(dataset.S), cfg.validation_fraction,
+                                                    cfg.test_fraction, cfg.seed, dataset.groups)
+        split = dict(train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
+        scales = {"S_scale": float(np.max(np.abs(dataset.S[train_idx]))),
+                  "u_scale": float(np.max(np.abs(dataset.u[train_idx])))}
+        scales = {k: v if v > 0 else 1.0 for k, v in scales.items()}
+        model = make_model(cfg)
+    else:
+        if fingerprint != resume.fingerprint:
+            raise ValueError("Continuation requires the same training dataset values, grid, and sample order")
+        for field in ("width", "modes", "input_channels", "output_channels", "padding"):
+            if getattr(cfg, field) != getattr(resume.cfg, field):
+                raise ValueError(f"Cannot change model {field} when continuing a checkpoint")
+        if resume.inference_padding is not None:
+            raise ValueError("Continue the original checkpoint, not a predictor adapted to another grid")
+        if not np.array_equal(dataset.groups, resume.groups):
+            raise ValueError("Training groups differ from the checkpoint")
+        for key in ("units", "boundary_conditions", "shared_bvp", "homogeneous_boundary_conditions",
+                    "kind", "diffusion_coefficients", "lambda"):
+            if dataset.metadata.get(key) != resume.metadata.get(key):
+                raise ValueError(f"Training metadata {key} differs from the checkpoint")
+        split = resume.splits
+        indices = np.concatenate(list(split.values()))
+        if (any(len(part) == 0 for part in split.values())
+                or not np.array_equal(np.sort(indices), np.arange(len(dataset.S)))):
+            raise ValueError("Invalid saved train/validation/test split")
+        train_idx, val_idx, test_idx = (split[k] for k in ("train_idx", "val_idx", "test_idx"))
+        scales = dict(resume.scales)
+        if any(not np.isfinite(v) or v <= 0 for v in scales.values()):
+            raise ValueError("Invalid checkpoint normalization scales")
+        model = resume.model
+        print("Continuing saved weights, splits, and scales with a fresh AdamW optimizer.", flush=True)
     optimizer = optax.adamw(cfg.learning_rate, weight_decay=cfg.weight_decay)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
@@ -139,6 +203,17 @@ def train_model(cfg: FNOConfig, dataset: Dataset):
         features = encode_source_features(dataset.S[indices], dataset.x, dataset.y, dataset.z, scales["S_scale"])
         return jnp.asarray(features), jnp.asarray(dataset.u[indices] / scales["u_scale"])
 
+    def validation_loss(model):
+        total = 0.0
+        for start in range(0, len(val_idx), cfg.batch_size):
+            indices = val_idx[start:start + cfg.batch_size]
+            features, targets = batch(indices)
+            total += float(relative_l2_loss(infer_batch(model, features), targets, cfg.loss_floor)) * len(indices)
+        loss = total / len(val_idx)
+        if not np.isfinite(loss):
+            raise FloatingPointError("Nonfinite validation loss")
+        return loss
+
     best_model, best_val, stale = model, float("inf"), 0
     history = {"train": [], "val": []}
     output = Path(cfg.checkpoint_dir)
@@ -146,6 +221,16 @@ def train_model(cfg: FNOConfig, dataset: Dataset):
         output = Path(__file__).resolve().parent / output
     cfg.checkpoint_dir = str(output)
     output.mkdir(parents=True, exist_ok=True)
+    if resume is not None:
+        best_val = validation_loss(model)
+        history["initial_val"] = best_val
+        history["optimizer_restarted"] = True
+        print(f"Starting checkpoint validation loss: {best_val:.6g}", flush=True)
+        # Keep a recoverable starting model even when writing to a new directory.
+        if not (output / "best_model.npz").exists():
+            save_checkpoint(model, output / "best_model.npz", cfg, scales, dataset, split,
+                            fingerprint=fingerprint)
+    history_path = output / ("continuation_history.json" if resume is not None else "history.json")
     rng = np.random.default_rng(cfg.seed)
     for epoch in range(cfg.epochs):
         total = 0.0
@@ -157,68 +242,71 @@ def train_model(cfg: FNOConfig, dataset: Dataset):
             if not bool(finite) or not np.isfinite(float(loss)):
                 raise FloatingPointError(f"Nonfinite loss or gradients at epoch {epoch + 1}")
             total += float(loss) * len(indices)
-        val_total = 0.0
-        for start in range(0, len(val_idx), cfg.batch_size):
-            indices = val_idx[start:start + cfg.batch_size]
-            features, targets = batch(indices)
-            val_total += float(relative_l2_loss(infer_batch(model, features), targets, cfg.loss_floor)) * len(indices)
-        val_loss = val_total / len(val_idx)
-        if not np.isfinite(val_loss):
-            raise FloatingPointError("Nonfinite validation loss")
+        val_loss = validation_loss(model)
         history["train"].append(total / len(train_idx))
         history["val"].append(val_loss)
         improved_for_stopping = val_loss < best_val - cfg.min_delta
         if val_loss < best_val:
             best_val, best_model = val_loss, model
-            save_checkpoint(model, output / "best_model.npz", cfg, scales, dataset, split, fingerprint=fingerprint)
+            save_checkpoint(model, output / "best_model.npz", cfg, scales, dataset, split, fingerprint=fingerprint,
+                            training_progress={"epoch_in_run": epoch + 1, "validation_loss": val_loss,
+                                               "continued_from_checkpoint": resume is not None})
         stale = 0 if improved_for_stopping else stale + 1
-        print(f"epoch {epoch + 1}: train={history['train'][-1]:.6g} val={val_loss:.6g}", flush=True)
+        history_path.write_text(json.dumps(history, indent=2))
+        print(f"epoch {epoch + 1}/{cfg.epochs}: train={history['train'][-1]:.6g} val={val_loss:.6g}", flush=True)
         if stale >= cfg.patience:
             break
-    (output / "history.json").write_text(json.dumps(history, indent=2))
     from jaxfno.plots import plot_history
-    plot_history(history, output / "loss_curves.png")
+    plot_history(history, output / ("continuation_loss_curves.png" if resume is not None else "loss_curves.png"))
     return best_model, {**scales, **split}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Supervised 3D FNO training")
+    parser.add_argument("--resume", nargs="?", const=str(Path(__file__).resolve().parent / "model" / "best_model.npz"),
+                        help="Continue weights from a checkpoint (default model/best_model.npz); restarts AdamW")
+    parser.add_argument("--epochs", type=int, help="Epoch limit for this run; additional epochs with --resume")
     parser.add_argument("--config", help="JSON FNOConfig with model settings and dataset layout")
-    inputs = parser.add_mutually_exclusive_group()
-    inputs.add_argument("--data", help="Override the training NPZ path (default: uxyz_data.npz)")
-    inputs.add_argument("--synthetic", action="store_true", help="Run the explicit synthetic smoke test")
+    parser.add_argument("--data", help="Override the training NPZ path (default: uxyz_data.npz)")
     args = parser.parse_args()
+    if args.epochs is not None and args.epochs < 1:
+        parser.error("--epochs must be positive")
+    if args.resume and args.epochs is None:
+        parser.error("Specify --epochs N for the number of additional epochs")
+    try:
+        resumed = load_predictor(args.resume) if args.resume else None
+    except (ValueError, FileNotFoundError, KeyError) as exc:
+        parser.error(f"Cannot load continuation checkpoint: {exc}")
     if args.config:
         cfg = FNOConfig.load(args.config)
-    elif args.synthetic:
-        cfg = FNOConfig(data_path="synthetic", width=8, modes=(4, 4, 3), padding=2,
-                        epochs=8, batch_size=4, synthetic_grid=(8, 8, 6),
-                        checkpoint_dir=str(Path(__file__).resolve().parent / "model" / "smoke"))
+    elif resumed is not None:
+        cfg = replace(resumed.cfg, dataset_layout=dict(resumed.cfg.dataset_layout),
+                      checkpoint_dir=str(Path(args.resume).resolve().parent))
     else:
         cfg = FNOConfig(data_path="uxyz_data.npz",
                         dataset_layout={"format": "sol3d", "source_grid": "uniform_domain"})
+    if args.epochs is not None:
+        cfg.epochs = args.epochs
     if args.data:
         cfg.data_path = args.data
-    elif args.synthetic:
-        cfg.data_path = "synthetic"
     if cfg.dataset_layout.get("format") == "sol3d":
         # Reconstruct the uniform source grid from this export's S and domain,
         # including when an older configuration still names a companion file.
         cfg.dataset_layout = {**cfg.dataset_layout, "source_grid": "uniform_domain"}
         cfg.dataset_layout.pop("source_path", None)
     try:
-        if cfg.data_path != "synthetic":
-            print(json.dumps(inspect_npz(cfg.data_path), indent=2))
+        print(json.dumps(inspect_npz(cfg.data_path), indent=2))
         dataset = dataset_from_config(cfg)
     except (ValueError, FileNotFoundError, KeyError) as exc:
         parser.error(f"Cannot load training dataset {cfg.data_path}: {exc}")
     print(f"{dataset.metadata.get('kind', 'physical')}: S{dataset.S.shape}, u{dataset.u.shape}")
-    if cfg.data_path == "synthetic":
-        print("SYNTHETIC SMOKE TEST ONLY: no PDE or physical accuracy validation.")
-    elif cfg.dataset_layout.get("format") == "sol3d":
+    if cfg.dataset_layout.get("format") == "sol3d":
         print(dataset.metadata["preprocessing"])
         print(dataset.metadata["units"])
-    train_model(cfg, dataset)
+    try:
+        train_model(cfg, dataset, resume=resumed)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"Saved best checkpoint to {cfg.checkpoint_dir}/best_model.npz")
 
 

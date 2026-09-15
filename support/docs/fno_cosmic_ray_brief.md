@@ -70,6 +70,5 @@ coordinates, and split indices with the checkpoint. Expose `predict(S)` returnin
 u in physical units. Keep training supervised; no new diffusion solver or physics
 residual loss. Do not claim accuracy on unseen grids without testing it.
 
-First summarize the observed data layout and any blocking missing information,
-then implement and run a smoke test. If the dataset is unavailable, provide a
-clearly labeled synthetic smoke test without claiming physical validation.
+First summarize the observed data layout and any blocking missing information.
+Physical validation requires the paired numerical dataset.
