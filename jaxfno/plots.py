@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LogNorm
 from matplotlib.ticker import StrMethodFormatter
 
 
@@ -88,11 +89,13 @@ def plot_prediction(dataset, index, pred, output):
     plt.close(fig)
 
 
-def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.0, 0.0), subset=None, display_realization=None):
+def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.0, 0.0), subset=None, display_realization=None, relative_error=False):
     """Source plus orthogonal XY/XZ/YZ slices (not line-of-sight integrals).
 
     Coordinates select nearest grid nodes. All fields are in dataset units,
     with shared reference/FNO color limits within each plane.
+    relative_error uses abs(pred - truth) / truth, masks zero truth, and
+    saves the comparison with a _rel filename suffix.
     """
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -133,26 +136,45 @@ def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.
                          else f"Realization {display_realization} (one-based)")
     info = (realization_label + (f" · {subset} subset" if subset else "")
             + f"\nDataset: {kind}\n"
+            + f"Prediction resolution (Nx × Ny × Nz): {pred.shape[0]} × {pred.shape[1]} × {pred.shape[2]}\n"
             + "XY, XZ, YZ cross-sections at the labeled grid coordinates.\n"
             + "Ground truth and FNO share a color scale in each row.\n"
-            + "Errors are FNO − ground truth, in dataset units.")
+            + ("Relative error = |FNO − ground truth| / ground truth (dimensionless).\n"
+               "Log color scale; zero ground truth and nonpositive errors are masked."
+               if relative_error else "Errors are FNO − ground truth, in dataset units."))
     if dataset.metadata.get("layout", {}).get("format") == "sol3d":
         info += "\nS is the interpolated solver-grid source; x, y, z are in kpc."
     info_ax.text(0.05, 0.5, info, va="center", fontsize=12, linespacing=1.7)
     for row, (horizontal, vertical, truth, estimate, xlabel, ylabel, title) in enumerate(planes, 1):
         low, high = min(truth.min(), estimate.min()), max(truth.max(), estimate.max())
         error = estimate - truth
-        limit = max(float(np.abs(error).max()), 1e-12)
-        for col, (values, label) in enumerate(((truth, "Ground truth"), (estimate, "FNO"), (error, "Error"))):
+        if relative_error:
+            error = np.ma.masked_invalid(np.divide(
+                np.abs(error), truth, out=np.full(truth.shape, np.nan, dtype=float),
+                where=truth != 0))
+            error = np.ma.masked_less_equal(error, 0)
+        error_label = "Relative error" if relative_error else "Error"
+        valid_error = np.ma.asarray(error).compressed()
+        limit = max(float(np.abs(valid_error).max()), 1e-12) if valid_error.size else 1.0
+        if relative_error:
+            log_low = float(valid_error.min()) if valid_error.size else 1e-6
+            log_high = float(valid_error.max()) if valid_error.size else 1.0
+            if log_high <= log_low:
+                log_low, log_high = log_low / 10, log_high * 10
+            error_norm = LogNorm(vmin=log_low, vmax=log_high)
+        for col, (values, label) in enumerate(((truth, "Ground truth"), (estimate, "FNO"), (error, error_label))):
             ax = fig.add_subplot(grid[row, col])
+            color_limits = ({"norm": error_norm} if relative_error else {"vmin": -limit, "vmax": limit}) if col == 2 else {"vmin": low, "vmax": high}
             im = ax.pcolormesh(horizontal, vertical, values.T, shading="auto",
-                               cmap="RdBu_r" if col == 2 else "viridis",
-                               vmin=-limit if col == 2 else low, vmax=limit if col == 2 else high)
+                               cmap=("magma" if relative_error else "RdBu_r") if col == 2 else "viridis",
+                               **color_limits)
             ax.set_title(f"{label}: {title} kpc")
             _format_plane(ax, dataset, horizontal, vertical, xlabel, ylabel)
-            _panel_colorbar(fig, ax, im, label="u (dataset units)")
+            _panel_colorbar(fig, ax, im, label="Relative error"
+                           if col == 2 and relative_error else "u (dataset units)")
     number = index if display_realization is None else display_realization
-    path = output / f"realization_{number}_comparison.png"
+    suffix = "_rel" if relative_error else ""
+    path = output / f"realization_{number}_comparison{suffix}.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path

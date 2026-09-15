@@ -4,21 +4,20 @@ We aim to build an approximate solution for the following diffusion equation
 
 $$-\left(\frac{\partial^2u}{\partial x^2}+\frac{\partial^2u}{\partial y^2}+\frac{\partial^2u}{\partial z^2}\right)=S(x,y)\delta(z).$$
 
-This might be later adapted for the physical case of infering the distribution of sources for Galactic cosmic rays, To this end, we present a supervised JAX + Equinox + Optax model mapping surface sources `S(N,Nx,Ny)` to `u(N,Nx,Ny,Nz)`. Prediction and comparison plotting are separate commands. Coordinates x, y, z are in kpc; S and u retain the solver's saved amplitude units.
+This might be later adapted for the physical case of infering the distribution of sources for Galactic cosmic rays, To this end, we present a supervised JAX + Equinox + Optax model mapping surface sources `S(x,y)` to `u(x,y,z)`. SInce we have  in mind application for cosmic rays, coordinates x, y, z are in kpc; S and u retain the solver's saved amplitude units.
 
 ## Project layout
 
-The top level contains the three command scripts, this README, and the two input NPZ files. Supporting files are organized as follows:
+The top level contains the three command scripts, this README, and the one input NPZ files (by default `uxyz_data.pz`). Supporting files are organized as follows:
 
 - `jaxfno/`: model, data loading, configuration, plotting, prediction archive I/O,
   and optional accuracy helpers.
 - `support/requirements.txt`: Python dependencies.
 - `support/tests/`: regression tests.
-- `support/docs/`: preserved original project brief, also merged below.
-- `model/`: trained checkpoints, loss curves, and training history (comparison plots
-  default to `model/`).
+- `support/docs/`: preserved original project brief.
+- `model/`: trained checkpoints, loss curves, training history, and comparison plots.
 
-Run commands from the project directory. Hidden `.git/`, `.gitignore`, and `.venv/` remain in place for version control and the existing environment. Training automatically creates `model/` beside `train.py` and saves `model/best_model.npz`; evaluation loads that file by default. The existing trained checkpoint has been copied there from `artifacts/`. Explicit `checkpoint_dir` settings remain supported; relative paths are resolved beside `train.py`.
+Run commands from the project directory. Hidden `.git/`, `.gitignore`, and `.venv/` remain in place for version control and the existing environment. Training automatically creates `model/` beside `train.py` and saves `model/best_model.npz`; evaluation loads that file by default.
 
 ## Setup
 
@@ -36,7 +35,7 @@ All `.npz` and `.png` files, local environments, and checkpoints are ignored by 
 python train.py
 ```
 
-Training defaults to `uxyz_data.npz`. The source coordinates are reconstructed from `S.shape` and the physical domain endpoints in the NPZ. Best validation weights and the configuration, normalization scales, coordinates, sample splits, and dataset fingerprint are saved to `model/best_model.npz`. Loss curves and history are saved beside it. 
+Training defaults to `uxyz_data.npz`. The source coordinates are reconstructed from `S.shape` within `uxyz_data.npz` and the physical domain endpoints in the NPZ. Best validation weights and the configuration, normalization scales, coordinates, sample splits, and dataset fingerprint are saved to `model/best_model.npz`. Loss curves and history are saved beside it. 
 
 To customize training, save a JSON configuration and pass `--config config.json`:
 

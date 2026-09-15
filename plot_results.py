@@ -12,6 +12,8 @@ def main():
     parser.add_argument("--data", default="uxyz_test.npz")
     parser.add_argument("--predictions", default=str(script_dir / "uxyz_pred.npz"))
     parser.add_argument("--realization", type=int, default=1, help="One-based realization number (default 1)")
+    parser.add_argument("--relative-error", action="store_true",
+                        help="Plot abs(FNO - truth) / truth with zero truth masked; save with _rel suffix")
     parser.add_argument("--output", default=str(script_dir / "model"),
                         help="Plot directory (default: model/ beside plot_results.py; created if needed)")
     for axis in "xyz":
@@ -21,7 +23,7 @@ def main():
         dataset, prediction = load_comparison(args.data, args.predictions, args.realization)
         path = plot_realization(dataset, 0, prediction, Path(args.output),
                                 slice_coordinates=(args.slice_x, args.slice_y, args.slice_z),
-                                display_realization=args.realization)
+                                display_realization=args.realization, relative_error=args.relative_error)
     except (ValueError, FileNotFoundError, KeyError) as exc:
         parser.error(str(exc))
     print(f"Saved {path}")
