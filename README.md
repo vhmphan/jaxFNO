@@ -1,8 +1,10 @@
 # JAX FNO for cosmic-ray diffusion
 
-Supervised JAX + Equinox + Optax model mapping surface sources `S(N,Nx,Ny)` to
-`u(N,Nx,Ny,Nz)`. Prediction and comparison plotting are separate commands.
-Coordinates x, y, z are in kpc; S and u retain the solver's saved amplitude units.
+We aim to build an approximate solution for the following diffusion equation 
+
+$$-\left(\frac{\partial^2u}{\partial x^2}+\frac{\partial^2u}{\partial y^2}+\frac{\partial^2u}{\partial z^2}\right)=S(x,y)\delta(z).$$
+
+This might be later adapted for the physical case of infering the distribution of sources for Galactic cosmic rays, To this end, we present a supervised JAX + Equinox + Optax model mapping surface sources `S(N,Nx,Ny)` to `u(N,Nx,Ny,Nz)`. Prediction and comparison plotting are separate commands. Coordinates x, y, z are in kpc; S and u retain the solver's saved amplitude units.
 
 ## Project layout
 
@@ -14,10 +16,8 @@ NPZ files. Supporting files are organized as follows:
 - `support/requirements.txt`: Python dependencies.
 - `support/tests/`: regression tests.
 - `support/docs/`: preserved original project brief, also merged below.
-- `model/`: trained checkpoints, loss curves, and training history.
-- `artifacts/`: previously generated outputs and archived checkpoints. New predictions
-  default to the folder containing the scripts; comparison plots
-  default to `model/`.
+- `model/`: trained checkpoints, loss curves, and training history (comparison plots
+  default to `model/`).
 
 Run commands from the project directory. Hidden `.git/`, `.gitignore`, and
 `.venv/` remain in place for version control and the existing environment.
