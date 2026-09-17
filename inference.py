@@ -29,20 +29,20 @@ from jax import random
 from jaxfno.inference_tools import make_forward, make_observation, check_forward, plot_results
 
 # Settings: keep the existing 33x33 source prior, with 17 output z nodes.
-SEED = 42
+SEED = 1
 GRID_SHAPE = (33, 33, 17)  # None uses the checkpoint's full training grid.
 CHECKPOINT = Path(__file__).resolve().parent / "model" / "best_model.npz"
 OUTPUT_DIR = Path(__file__).resolve().parent / "results_fno"
-OBSERVATION_MASK = None  # Optional boolean XYZ .npy mask; None observes all voxels.
+OBSERVATION_MASK = "observation_mask.npy"  # Optional boolean XYZ .npy mask; None observes all voxels.
 NOISE_STD = 0.15  # Absolute standard deviation in saved u units.
-VI_ITERATIONS = 6
+VI_ITERATIONS = 1
 SAMPLE_PAIRS = 4  # NIFTy returns twice this many (antithetic) posterior samples.
 
 # These describe s=log(S), NOT the mean and std of S. Hyperparameters are inferred.
 LOG_OFFSET_MEAN = 2.0
 LOG_OFFSET_STD = (0.1, 0.03)
 LOG_FLUCTUATIONS = (1.0, 0.5)
-LOG_SPECTRAL_SLOPE = (-5.0, 0.2)
+LOG_SPECTRAL_SLOPE = (-3.0, 0.2)
 LOG_FLEXIBILITY = (1.0, 0.2)
 LOG_ASPERITY = (0.5, 0.05)
 
@@ -119,8 +119,8 @@ def main():
     forward = Forward(make_prior(predictor.coordinates), fno, observe)
     k_truth, k_noise, k_infer = random.split(random.PRNGKey(SEED), 3)
     truth_position = forward.init(k_truth)
-    true_source = np.asarray(forward.S(truth_position))
-    true_u = forward.u(truth_position)
+    true_source = 3.0 * np.asarray(forward.S(truth_position))
+    true_u = forward.fno(true_source)
 
     # Fixed known noise std, independent of the actual random noise realization.
     clean_data = observe(true_u)

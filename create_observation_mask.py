@@ -16,8 +16,8 @@ import numpy as np
 
 
 # Observed region bounds in kpc. Use None for a domain edge (no restriction).
-x_min = -6.0
-x_max = 6.0
+x_min = -2.0
+x_max = 10.0
 y_min = -6.0
 y_max = 6.0
 z_min = -2.0
