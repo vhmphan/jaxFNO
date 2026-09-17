@@ -93,7 +93,7 @@ def main():
     except (ValueError, FileNotFoundError, KeyError) as exc:
         parser.error(str(exc))
     print(f"Runtime: {runtime['total_seconds']:.4f} s total; "
-          f"{runtime['seconds_per_realization']:.4f} s/realization (warm-up excluded).")
+          f"{runtime['seconds_per_realization']:.4f} s/realization (warm-up and NPZ saving excluded).")
     print(f"Saved {len(indices)} predictions to {destination}")
 
 

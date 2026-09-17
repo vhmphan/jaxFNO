@@ -4,6 +4,7 @@
 checkpoints/
 artifacts/
 model/
+results_fno/
 
 # Local Python environment and caches
 .venv/

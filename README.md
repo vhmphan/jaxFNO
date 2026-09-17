@@ -112,6 +112,14 @@ Padding is adjusted independently on each axis according to `round_half_up(train
 
 Use `plot_results.py` with ground truth on the **same test grid** to inspect the result. Higher resolution increases memory/runtime and does not guarantee better accuracy. Resolution transfer must be validated against the finer-grid numerical solutions; it is not a claim of physical accuracy.
 
+To additionally compare ground truth and FNO along z at a particular `(x, y)` in kpc:
+
+```bash
+python plot_results.py --realization 5 --z-profile 2 -3
+```
+
+The profile uses the nearest grid nodes and labels their actual coordinates. It is saved as `model/realization_5_z_profile_ix<index>_iy<index>.png`; the grid indices distinguish profiles at different positions.
+
 ## Plot ground truth versus saved predictions
 
 ```bash

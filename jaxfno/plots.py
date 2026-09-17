@@ -89,6 +89,39 @@ def plot_prediction(dataset, index, pred, output):
     plt.close(fig)
 
 
+def plot_z_profile(dataset, index, pred, output, *, x=0.0, y=0.0, display_realization=None):
+    """Plot truth and prediction along z at the nearest requested XY grid node."""
+    ref = dataset.u[index]
+    pred = np.asarray(pred)
+    if pred.shape != ref.shape or not np.isfinite(pred).all():
+        raise ValueError("Prediction must be finite and match the selected target shape")
+    indices = []
+    for name, requested in (("x", x), ("y", y)):
+        coord = getattr(dataset, name)
+        if not np.isfinite(requested) or not coord.min() <= requested <= coord.max():
+            raise ValueError(f"Requested {name} profile position is outside the dataset domain")
+        indices.append(int(np.argmin(np.abs(coord - requested))))
+    ix, iy = indices
+    number = index if display_realization is None else display_realization
+    numbering = "zero-based" if display_realization is None else "one-based"
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    path = output / f"realization_{number}_z_profile_ix{ix}_iy{iy}.png"
+    fig, ax = plt.subplots(figsize=(7, 4.5), layout="constrained")
+    ax.plot(dataset.z, ref[ix, iy, :], label="Ground truth")
+    ax.plot(dataset.z, pred[ix, iy, :], "--", label="FNO")
+    ax.set(xlabel="z (kpc)", ylabel="u (dataset units)",
+           xlim=(dataset.z.min(), dataset.z.max()),
+           title=f"Realization {number} ({numbering})\n"
+                 f"Z profile at x={dataset.x[ix]:.4g}, y={dataset.y[iy]:.4g} kpc")
+    _format_coordinate_axis(ax.xaxis, dataset.z, "z")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def plot_realization(dataset, index, pred, output, *, slice_coordinates=(0.0, 0.0, 0.0), subset=None, display_realization=None, relative_error=False):
     """Source plus orthogonal XY/XZ/YZ slices (not line-of-sight integrals).
 

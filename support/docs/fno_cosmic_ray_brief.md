@@ -73,5 +73,19 @@ residual loss. Do not claim accuracy on unseen grids without testing it.
 First summarize the observed data layout and any blocking missing information.
 Physical validation requires the paired numerical dataset.
 
-jax Gaussian Seidel -> 300 realizations -> 167.02 seconds
+CPU 
+
+Resolution 129 x 129 x 65
+jax Gauss Seidel -> 300 realizations -> 167.02 seconds
+jax FNO          -> 300 realizations -> 54.64 seconds
+
+2 * Resolution 129 x 129 x 65
+jax Gauss Seidel -> 30 realizations -> 167.02 seconds
+jax FNO          -> 30 realizations -> 54.64 seconds
+
+GPU A100 
+
+Resolution 129 x 129 x 65 
+jax Gauss Seidel -> 1 realization -> 0.238 second
+jax FNO          -> 1 realization -> 0.027 second
 
