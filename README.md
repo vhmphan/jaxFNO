@@ -69,6 +69,23 @@ The epoch display starts at 1 for the new run. Best checkpoints now record their
 
 ## Predict all sources and measure runtime
 
+To convert raw `sources.npz` maps into a prediction input without solving for `u`:
+
+```bash
+python create_src_data.py
+python evaluate.py --data src_data.npz
+```
+
+The converter uses the physical domain from `model/best_model.npz` and creates a
+257 × 257 × 129 prediction grid by default. Use `--grid-shape NX NY NZ` to change
+the resolution. It writes `src_data.npz` with the extra ghost coordinates expected
+by the sol3d loader (stored coordinate lengths: 259, 259, 131). Raw source
+amplitudes and sample order are preserved; evaluation performs interpolation and
+normalization. The source x/y coordinates must be uniform and span the checkpoint's
+domain. Maps default to `(N,Nx,Ny)`, matching the source generator, including square
+grids; use `--source-axes yx` for `(N,Ny,Nx)` input. A single 2D map is also accepted.
+Use `--sources`, `--checkpoint`, and `--output` to override the file paths.
+
 ```bash
 python evaluate.py
 ```
@@ -78,7 +95,7 @@ This reads **every source** from `uxyz_test.npz` and writes `uxyz_pred.npz`. Eac
 The original source grid is assumed uniform over the same physical x/y domain as the solver, as in the inspected source generator. The loader removes the solver's ghost coordinates and reconstructs source coordinates using `linspace(x[0], x[-1], S.shape[2])` and `linspace(y[0], y[-1], S.shape[1])`, since stored S has order `(N,Ny,Nx)`. It then applies the same linear interpolation onto the solver grid. Domain endpoints and axis orientation must match the checkpoint; the number of grid nodes may differ.
 
 ```bash
-python evaluate.py --data uxyz_test.npz --output uxyz_pred.npz
+python evaluate.py --data uxyz_test.npz --output uxyz_pred.npz --realization-range 1 10
 ```
 
 Prediction works without a `u` array. An optional one inclusive range is

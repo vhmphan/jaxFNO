@@ -4,6 +4,7 @@
 checkpoints/
 artifacts/
 model/
+model_comp/
 results_fno/
 *.npy
 
